@@ -24,12 +24,18 @@ class InteractionEvent:
 
 
 @dataclass(slots=True)
-class Intent:
-    task_type: str
-    pickup_location: str | None = None
-    dropoff_location: str | None = None
-    item: str | None = None
-    raw_text: str = ""
+class PlannedSkillCall:
+    skill: str
+    args: dict[str, Any]
+    on_fail: str = "abort"
+
+
+@dataclass(slots=True)
+class TaskSequence:
+    goal: str
+    steps: list[PlannedSkillCall]
+    planner_source: str = "unknown"
+    reply_text: str | None = None
 
 
 @dataclass(slots=True)
@@ -45,12 +51,15 @@ class TaskPlan:
     task_id: str
     goal: str
     steps: list[PlanStep]
+    reply_text: str | None = None
 
 
 @dataclass(slots=True)
 class ExecutionEvent:
     task_id: str
     step_id: str
+    skill: str
     status: TaskStatus
     detail: str
+    data: Any = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

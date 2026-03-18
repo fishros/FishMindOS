@@ -1,0 +1,49 @@
+{
+  "llm": {
+    "provider": "zhipu",
+    "base_url": "",
+    "api_url": "",
+    "model": "glm-5",
+    "api_key": "replace-with-your-api-key",
+    "timeout_sec": 30,
+    "prompt_mode": "full"
+  },
+  "nav": {
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "port": 9002,
+    "base_url": "",
+    "timeout_sec": 15,
+    "auth_token": "",
+    "username": "",
+    "password": ""
+  },
+  "rosbridge": {
+    "ws_url": "",
+    "scheme": "ws",
+    "host": "127.0.0.1",
+    "port": 8888,
+    "path": "/api/rt",
+    "timeout_sec": 5,
+    "motion_presets": {
+      "stand": {
+        "linear_z": 1.0
+      },
+      "lie_down": {
+        "linear_z": -1.0
+      }
+    }
+  },
+  "planner": {
+    "motion_aliases": {
+      "站立": "stand",
+      "起立": "stand",
+      "站起来": "stand",
+      "趴下": "lie_down",
+      "卧倒": "lie_down"
+    }
+  },
+  "task_chains": {
+    "storage_file": "task_chains.json"
+  }
+}
