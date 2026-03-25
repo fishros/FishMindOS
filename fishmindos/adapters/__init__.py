@@ -12,6 +12,7 @@ from fishmindos.adapters.base import (
     AdapterError,
 )
 from fishmindos.adapters.fishbot import FishBotAdapter, create_fishbot_adapter
+from fishmindos.adapters.your_robot import YourRobotAdapter, create_your_robot_adapter
 
 __all__ = [
     "RobotAdapter",
@@ -22,4 +23,6 @@ __all__ = [
     "AdapterError",
     "FishBotAdapter",
     "create_fishbot_adapter",
+    "YourRobotAdapter",
+    "create_your_robot_adapter",
 ]

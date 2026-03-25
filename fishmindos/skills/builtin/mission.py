@@ -33,7 +33,7 @@ class SubmitMissionSkill(Skill):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["goto", "dock", "light", "speak", "wait_confirm", "query"],
+                            "enum": ["goto", "dock", "light", "speak", "wait_confirm", "query", "stop_nav"],
                             "description": "Action type.",
                         },
                         "target": {"type": "string", "description": "Target for goto."},

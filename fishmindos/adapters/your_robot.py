@@ -1,33 +1,58 @@
 """
-YourRobot 适配器示例
-用于接入其他品牌机器人的完整实现
+Reference adapter template for integrating a different robot API into FishMindOS.
+
+This file is intentionally written as a readable template rather than a production
+adapter. The goal is to show which methods matter, what each method should return,
+and where a new vendor API needs to be mapped.
+
+How to use this template:
+
+1. Copy this file and rename the class/factory if needed.
+2. Replace the placeholder endpoint paths with your real API paths.
+3. Update `_is_success_response()` and `_extract_data()` to match your response shape.
+4. Fill in any optional capabilities your robot supports:
+   - light control
+   - audio / TTS
+   - docking
+   - callback or websocket state sync
+
+FishMindOS will call the adapter through the `RobotAdapter` interface, so once this
+file is correctly implemented, the rest of the system can stay unchanged.
 """
 
+from __future__ import annotations
+
 import json
-import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from fishmindos.adapters.base import (
-    RobotAdapter, MapInfo, WaypointInfo, TaskInfo, RobotStatus, AdapterError
+    AdapterError,
+    MapInfo,
+    RobotAdapter,
+    RobotStatus,
+    TaskInfo,
+    WaypointInfo,
 )
 
 
-class YourRobotAPIError(Exception):
-    """YourRobot API错误"""
-    pass
+class YourRobotAPIError(AdapterError):
+    """Raised when the vendor API returns an error or cannot be reached."""
 
 
 @dataclass
 class YourRobotConfig:
-    """YourRobot 配置"""
-    host: str = "192.168.1.100"
+    """Connection settings for the vendor robot API."""
+
+    host: str = "127.0.0.1"
     port: int = 8080
+    protocol: str = "http"
     api_key: str = ""
-    protocol: str = "http"  # http 或 https
-    timeout: int = 30
-    
+    timeout: int = 15
+
     @property
     def base_url(self) -> str:
         return f"{self.protocol}://{self.host}:{self.port}"
@@ -35,587 +60,567 @@ class YourRobotConfig:
 
 class YourRobotAdapter(RobotAdapter):
     """
-    YourRobot 适配器 - 示例实现
-    
-    适配其他品牌机器人的标准接口
-    支持: HTTP REST API + WebSocket 实时控制
+    Reference adapter for a custom robot.
+
+    The current implementation is a template with placeholder endpoint paths.
+    It is designed to be easy to read and modify, not to match a specific vendor.
+
+    Minimum methods you usually need for FishMindOS:
+    - connect / disconnect
+    - list_maps / list_waypoints
+    - start_navigation / stop_navigation
+    - navigate_to or goto_waypoint
+    - get_navigation_status
+    - get_basic_status
+
+    Optional but recommended:
+    - execute_docking_async
+    - play_audio
+    - set_light
+    - callback or websocket state sync
     """
-    
-    def __init__(self, 
-                 host: str = "192.168.1.100",
-                 port: int = 8080,
-                 api_key: str = "",
-                 **kwargs):
-        """
-        初始化适配器
-        
-        Args:
-            host: 机器人IP地址
-            port: API端口
-            api_key: API认证密钥
-            **kwargs: 其他配置参数
-        """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        api_key: str = "",
+        protocol: str = "http",
+        timeout: int = 15,
+        **_: Any,
+    ) -> None:
         self.config = YourRobotConfig(
             host=host,
             port=port,
-            api_key=api_key
+            protocol=protocol,
+            api_key=api_key,
+            timeout=timeout,
         )
-        
-        # 内部状态
         self._connected = False
         self._current_map_id: Optional[int] = None
-        self._current_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-        self._battery = 100.0
+        self._current_map_name: Optional[str] = None
         self._nav_running = False
-        
-        # WebSocket 客户端（如果需要实时控制）
-        self.ws_client = None
-        
-        print(f"[YourRobot] 适配器初始化: {self.config.base_url}")
-    
+        self._charging = False
+        self._battery_soc: Optional[float] = None
+        self._current_pose: Dict[str, Any] = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
     @property
     def vendor_name(self) -> str:
-        return "YourRobot Navigator"
-    
-    # ========== HTTP 请求封装 ==========
-    
-    def _request(self, 
-                 method: str, 
-                 endpoint: str, 
-                 data: Dict = None, 
-                 params: Dict = None) -> Dict:
-        """
-        发送HTTP请求
-        
-        Args:
-            method: HTTP方法 (GET/POST/PUT/DELETE)
-            endpoint: API端点
-            data: 请求体数据
-            params: URL参数
-            
-        Returns:
-            API响应数据
-            
-        Raises:
-            YourRobotAPIError: 请求失败
-        """
+        return "YourRobot"
+
+    # ------------------------------------------------------------------
+    # HTTP helpers
+    # ------------------------------------------------------------------
+
+    def _build_url(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> str:
         url = f"{self.config.base_url}{endpoint}"
-        
         if params:
-            import urllib.parse
             query = urllib.parse.urlencode(params)
             url = f"{url}?{query}"
-        
+        return url
+
+    def _headers(self) -> Dict[str, str]:
         headers = {
+            "Accept": "application/json",
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Accept": "application/json"
         }
-        
-        body = json.dumps(data).encode('utf-8') if data else None
-        
+        if self.config.api_key:
+            # Replace this header if your API uses a different auth scheme.
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
+
+    def _is_success_response(self, payload: Dict[str, Any]) -> bool:
+        """
+        Normalize the vendor success condition.
+
+        Replace this method if your API uses something else, for example:
+        - payload["success"] is True
+        - payload["code"] == 200
+        - payload["status"] == "ok"
+        """
+
+        if "success" in payload:
+            return bool(payload.get("success"))
+        if "code" in payload:
+            return payload.get("code") in {0, 200}
+        return True
+
+    def _extract_data(self, payload: Dict[str, Any]) -> Any:
+        """
+        Normalize the vendor data field.
+
+        Replace this method if your API uses:
+        - payload["result"]
+        - payload["data"]["items"]
+        - payload itself as the response body
+        """
+
+        if "data" in payload:
+            return payload.get("data")
+        if "result" in payload:
+            return payload.get("result")
+        return payload
+
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        url = self._build_url(endpoint, params=params)
+        body = json.dumps(data).encode("utf-8") if data is not None else None
         req = urllib.request.Request(
             url,
             data=body,
-            headers=headers,
-            method=method
+            headers=self._headers(),
+            method=method.upper(),
         )
-        
+
         try:
             with urllib.request.urlopen(req, timeout=self.config.timeout) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                # 检查业务错误码
-                if result.get("code", 0) != 0:
-                    error_msg = result.get("msg", "未知错误")
-                    raise YourRobotAPIError(f"API错误: {error_msg} (code:{result.get('code')})")
-                
-                return result
-                
-        except urllib.error.HTTPError as e:
-            raise YourRobotAPIError(f"HTTP {e.code}: {e.reason}")
-        except Exception as e:
-            raise YourRobotAPIError(f"请求失败: {e}")
-    
-    # ========== 连接管理 ==========
-    
+                raw = response.read().decode("utf-8")
+                payload = json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raise YourRobotAPIError(f"HTTP {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise YourRobotAPIError(f"request failed: {exc.reason}") from exc
+        except Exception as exc:
+            raise YourRobotAPIError(f"request failed: {exc}") from exc
+
+        if not isinstance(payload, dict):
+            raise YourRobotAPIError("API response is not a JSON object")
+        if not self._is_success_response(payload):
+            raise YourRobotAPIError(str(payload))
+        return payload
+
+    # ------------------------------------------------------------------
+    # Basic connection and status
+    # ------------------------------------------------------------------
+
     def connect(self) -> Dict[str, Any]:
         """
-        连接到机器人并执行健康检查
-        
-        Returns:
-            {
-                "success": bool,
-                "status": str,
-                "details": Dict
-            }
+        Ping a cheap health/status endpoint.
+
+        Replace `/api/robot/status` with a real endpoint that proves the robot API
+        is reachable. The return value should stay structured because the startup UI
+        prints it directly.
         """
-        results = {
+
+        result = {
             "success": False,
             "status": "offline",
-            "details": {}
+            "details": {},
         }
-        
         try:
-            # 测试连接 - 获取机器人状态
-            response = self._request("GET", "/api/robot/status")
-            
-            if response.get("code", -1) == 0:
-                self._connected = True
-                results["success"] = True
-                results["status"] = "online"
-                results["details"] = response.get("data", {})
-                print(f"[YourRobot] 连接成功: {self.config.base_url}")
-            else:
-                results["status"] = "error"
-                results["details"]["error"] = response.get("msg", "未知错误")
-                
-        except Exception as e:
-            results["status"] = "offline"
-            results["details"]["error"] = str(e)
-            print(f"[YourRobot] 连接失败: {e}")
-        
-        return results
-    
+            payload = self._request("GET", "/api/robot/status")
+            data = self._extract_data(payload) or {}
+            self._connected = True
+            self._battery_soc = data.get("battery_soc", self._battery_soc)
+            self._charging = bool(data.get("charging", self._charging))
+            self._nav_running = bool(data.get("nav_running", self._nav_running))
+            result["success"] = True
+            result["status"] = "online"
+            result["details"] = data if isinstance(data, dict) else {"raw": data}
+            return result
+        except Exception as exc:
+            result["details"]["error"] = str(exc)
+            return result
+
     def disconnect(self) -> None:
-        """断开连接"""
         self._connected = False
-        if self.ws_client:
-            # 关闭WebSocket连接
+
+    def get_basic_status(self) -> Dict[str, Any]:
+        """
+        FishMindOS uses this for high-level status answers and `query` actions.
+
+        If your robot exposes several endpoints, you can merge them here.
+        """
+
+        try:
+            payload = self._request("GET", "/api/robot/status")
+            data = self._extract_data(payload) or {}
+            if isinstance(data, dict):
+                self._battery_soc = data.get("battery_soc", self._battery_soc)
+                self._charging = bool(data.get("charging", self._charging))
+                self._nav_running = bool(data.get("nav_running", self._nav_running))
+                pose = data.get("current_pose") or {}
+                if isinstance(pose, dict) and pose:
+                    self._current_pose = {
+                        "x": float(pose.get("x", self._current_pose.get("x", 0.0)) or 0.0),
+                        "y": float(pose.get("y", self._current_pose.get("y", 0.0)) or 0.0),
+                        "yaw": float(pose.get("yaw", self._current_pose.get("yaw", 0.0)) or 0.0),
+                    }
+                return {
+                    "nav_running": self._nav_running,
+                    "charging": self._charging,
+                    "battery_soc": self._battery_soc,
+                    "current_pose": self._current_pose,
+                }
+        except Exception:
             pass
-        print("[YourRobot] 断开连接")
-    
-    # ========== 地图操作 ==========
-    
-    def list_maps(self) -> List[MapInfo]:
-        """获取地图列表"""
-        try:
-            result = self._request("GET", "/api/maps/list")
-            maps_data = result.get("data", {}).get("maps", [])
-            
-            return [
-                MapInfo(
-                    id=m["id"],
-                    name=m["name"],
-                    description=m.get("description", "")
-                )
-                for m in maps_data
-            ]
-        except Exception as e:
-            print(f"[YourRobot] 获取地图列表失败: {e}")
-            return []
-    
-    def get_map(self, map_id: int) -> Optional[MapInfo]:
-        """获取地图详情"""
-        try:
-            result = self._request("GET", f"/api/maps/{map_id}")
-            data = result.get("data", {})
-            
-            return MapInfo(
-                id=data["id"],
-                name=data["name"],
-                description=data.get("description", "")
-            )
-        except Exception as e:
-            print(f"[YourRobot] 获取地图详情失败: {e}")
-            return None
-    
-    def start_navigation(self, map_id: int) -> bool:
-        """启动导航（加载地图）"""
-        try:
-            result = self._request(
-                "POST", 
-                "/api/navigation/start",
-                data={"map_id": map_id}
-            )
-            
-            if result.get("code", -1) == 0:
-                self._current_map_id = map_id
-                self._nav_running = True
-                print(f"[YourRobot] 导航已启动，地图ID: {map_id}")
-                return True
-            return False
-            
-        except Exception as e:
-            print(f"[YourRobot] 启动导航失败: {e}")
-            return False
-    
-    def stop_navigation(self) -> bool:
-        """停止导航"""
-        try:
-            result = self._request("POST", "/api/navigation/stop")
-            self._nav_running = False
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 停止导航失败: {e}")
-            return False
-    
-    def pause_navigation(self) -> bool:
-        """暂停导航"""
-        try:
-            result = self._request("POST", "/api/navigation/pause")
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 暂停导航失败: {e}")
-            return False
-    
-    def resume_navigation(self) -> bool:
-        """恢复导航"""
-        try:
-            result = self._request("POST", "/api/navigation/resume")
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 恢复导航失败: {e}")
-            return False
-    
+
+        return {
+            "nav_running": self._nav_running,
+            "charging": self._charging,
+            "battery_soc": self._battery_soc,
+            "current_pose": self._current_pose,
+        }
+
     def get_navigation_status(self) -> Dict[str, Any]:
-        """获取导航状态"""
+        """
+        Replace `/api/navigation/status` with your robot's navigation status endpoint.
+        """
+
         try:
-            result = self._request("GET", "/api/navigation/status")
-            return result.get("data", {})
-        except Exception as e:
-            return {"nav_running": False, "error": str(e)}
-    
-    # ========== 路点操作 ==========
-    
-    def list_waypoints(self, map_id: int) -> List[WaypointInfo]:
-        """获取路点列表"""
+            payload = self._request("GET", "/api/navigation/status")
+            data = self._extract_data(payload) or {}
+            if isinstance(data, dict):
+                self._nav_running = bool(data.get("nav_running", self._nav_running))
+                self._current_map_id = data.get("current_map_id", self._current_map_id)
+                return data
+        except Exception:
+            pass
+
+        return {
+            "nav_running": self._nav_running,
+            "current_map_id": self._current_map_id,
+        }
+
+    # ------------------------------------------------------------------
+    # Maps and waypoints
+    # ------------------------------------------------------------------
+
+    def list_maps(self) -> List[MapInfo]:
+        """
+        Replace `/api/maps` with your map-list endpoint and adapt field names below.
+        """
+
         try:
-            result = self._request(
-                "GET", 
-                f"/api/maps/{map_id}/waypoints"
-            )
-            
-            waypoints = result.get("data", {}).get("waypoints", [])
-            
-            return [
-                WaypointInfo(
-                    id=wp["id"],
-                    name=wp["name"],
-                    map_id=map_id,
-                    x=wp.get("x", 0.0),
-                    y=wp.get("y", 0.0),
-                    z=wp.get("z", 0.0),
-                    yaw=wp.get("yaw", 0.0)
+            payload = self._request("GET", "/api/maps")
+            data = self._extract_data(payload) or []
+            items = data.get("maps", data) if isinstance(data, dict) else data
+            result: List[MapInfo] = []
+            for item in items or []:
+                result.append(
+                    MapInfo(
+                        id=int(item["id"]),
+                        name=str(item["name"]),
+                        description=str(item.get("description", "")),
+                    )
                 )
-                for wp in waypoints
-            ]
-        except Exception as e:
-            print(f"[YourRobot] 获取路点列表失败: {e}")
+            return result
+        except Exception:
             return []
-    
-    def get_waypoint(self, waypoint_id: int) -> Optional[WaypointInfo]:
-        """获取路点详情"""
+
+    def get_map(self, map_id: int) -> Optional[MapInfo]:
         try:
-            result = self._request("GET", f"/api/waypoints/{waypoint_id}")
-            data = result.get("data", {})
-            
-            return WaypointInfo(
-                id=data["id"],
-                name=data["name"],
-                map_id=data.get("map_id", 0),
-                x=data.get("x", 0.0),
-                y=data.get("y", 0.0),
-                yaw=data.get("yaw", 0.0)
+            payload = self._request("GET", f"/api/maps/{map_id}")
+            data = self._extract_data(payload) or {}
+            return MapInfo(
+                id=int(data["id"]),
+                name=str(data["name"]),
+                description=str(data.get("description", "")),
             )
-        except Exception as e:
-            print(f"[YourRobot] 获取路点详情失败: {e}")
+        except Exception:
             return None
-    
-    def goto_waypoint(self, waypoint_id: int) -> bool:
-        """前往指定路点"""
+
+    def list_waypoints(self, map_id: int) -> List[WaypointInfo]:
+        """
+        Replace `/api/maps/{map_id}/waypoints` with your real waypoint-list endpoint.
+        """
+
         try:
-            result = self._request(
-                "POST",
-                "/api/navigation/goto/waypoint",
-                data={"waypoint_id": waypoint_id}
-            )
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 前往路点失败: {e}")
-            return False
-    
-    def goto_location(self, location: str, location_type: str = "waypoint") -> bool:
-        """前往指定位置（通过名称）"""
-        try:
-            # YourRobot 可能支持通过名称导航
-            result = self._request(
-                "POST",
-                "/api/navigation/goto/location",
-                data={
-                    "location": location,
-                    "type": location_type
-                }
-            )
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 前往位置失败: {e}")
-            return False
-    
-    def goto_point(self, x: float, y: float, yaw: float = None) -> bool:
-        """前往指定坐标"""
-        try:
-            data = {"x": x, "y": y}
-            if yaw is not None:
-                data["yaw"] = yaw
-            
-            result = self._request(
-                "POST",
-                "/api/navigation/goto/point",
-                data=data
-            )
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 前往坐标失败: {e}")
-            return False
-    
-    def goto_dock(self, map_id: int = None) -> bool:
-        """前往回充点"""
-        try:
-            data = {}
-            if map_id:
-                data["map_id"] = map_id
-            
-            result = self._request(
-                "POST",
-                "/api/navigation/goto/dock",
-                data=data
-            )
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 前往回充点失败: {e}")
-            return False
-    
-    # ========== 等待事件 ==========
-    
-    def wait_nav_started(self, timeout: int = 60) -> bool:
-        """等待导航启动"""
-        import time
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            status = self.get_navigation_status()
-            if status.get("nav_running"):
-                return True
-            time.sleep(0.5)
-        
-        return False
-    
-    def wait_arrival(self, waypoint_id: int = None, timeout: int = 300) -> bool:
-        """等待到达路点"""
-        import time
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            status = self.get_navigation_status()
-            if not status.get("nav_running"):
-                # 导航停止，可能已到达
-                return True
-            time.sleep(0.5)
-        
-        return False
-    
-    def wait_dock_complete(self, timeout: int = 300) -> bool:
-        """等待回充完成"""
-        import time
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            status = self.get_status()
-            if status.charging:
-                return True
-            time.sleep(1.0)
-        
-        return False
-    
-    # ========== 运动控制 ==========
-    
-    def motion_stand(self) -> bool:
-        """站立"""
-        try:
-            result = self._request("POST", "/api/robot/stand")
-            print("[YourRobot] 机器狗已站立")
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 站立失败: {e}")
-            return False
-    
-    def motion_lie_down(self) -> bool:
-        """趴下"""
-        try:
-            result = self._request("POST", "/api/robot/lie_down")
-            print("[YourRobot] 机器狗已趴下")
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 趴下失败: {e}")
-            return False
-    
-    # ========== 灯光控制 ==========
-    
-    def set_light(self, code: int) -> bool:
-        """设置灯光"""
-        try:
-            result = self._request(
-                "POST",
-                "/api/robot/light",
-                data={"code": code}
-            )
-            colors = {11: "红灯", 13: "绿灯", 0: "关灯"}
-            print(f"[YourRobot] 灯光已设置为: {colors.get(code, '自定义')}")
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 设置灯光失败: {e}")
-            return False
-    
-    # ========== 音频控制 ==========
-    
-    def play_audio(self, text: str) -> bool:
-        """播放语音"""
-        try:
-            result = self._request(
-                "POST",
-                "/api/robot/tts",
-                data={"text": text}
-            )
-            print(f"[YourRobot] 播报: {text}")
-            return result.get("code", -1) == 0
-        except Exception as e:
-            print(f"[YourRobot] 语音播报失败: {e}")
-            return False
-    
-    # ========== 状态查询 ==========
-    
-    def get_status(self) -> RobotStatus:
-        """获取完整状态"""
-        try:
-            result = self._request("GET", "/api/robot/status")
-            data = result.get("data", {})
-            
-            self._battery = data.get("battery", 100.0)
-            self._nav_running = data.get("nav_running", False)
-            
-            pose = data.get("pose", {})
-            self._current_pose = {
-                "x": pose.get("x", 0.0),
-                "y": pose.get("y", 0.0),
-                "yaw": pose.get("yaw", 0.0)
-            }
-            
-            return RobotStatus(
-                nav_running=self._nav_running,
-                charging=data.get("charging", False),
-                battery_soc=self._battery,
-                current_pose=self._current_pose
-            )
-        except Exception as e:
-            print(f"[YourRobot] 获取状态失败: {e}")
-            return RobotStatus()
-    
-    def get_current_pose(self) -> Dict[str, float]:
-        """获取当前位置"""
-        return self._current_pose.copy()
-    
-    def get_battery(self) -> Dict[str, Any]:
-        """获取电池状态"""
-        try:
-            result = self._request("GET", "/api/robot/battery")
-            return result.get("data", {"soc": 100.0, "charging": False})
-        except Exception as e:
-            return {"soc": 100.0, "charging": False, "error": str(e)}
-    
-    # ========== 任务管理 ==========
-    
-    def list_tasks(self) -> List[TaskInfo]:
-        """获取任务列表"""
-        try:
-            result = self._request("GET", "/api/tasks/list")
-            tasks = result.get("data", {}).get("tasks", [])
-            
-            return [
-                TaskInfo(
-                    id=t["id"],
-                    name=t["name"],
-                    description=t.get("description", ""),
-                    status=t.get("status", "idle")
+            payload = self._request("GET", f"/api/maps/{map_id}/waypoints")
+            data = self._extract_data(payload) or []
+            items = data.get("waypoints", data) if isinstance(data, dict) else data
+            result: List[WaypointInfo] = []
+            for item in items or []:
+                result.append(
+                    WaypointInfo(
+                        id=int(item["id"]),
+                        name=str(item["name"]),
+                        map_id=int(item.get("map_id", map_id)),
+                        x=float(item.get("x", 0.0) or 0.0),
+                        y=float(item.get("y", 0.0) or 0.0),
+                        z=float(item.get("z", 0.0) or 0.0),
+                        yaw=float(item.get("yaw", 0.0) or 0.0),
+                        type=str(item.get("type", "normal")),
+                    )
                 )
-                for t in tasks
-            ]
-        except Exception as e:
+            return result
+        except Exception:
             return []
-    
-    def create_task(self, name: str, description: str = "", program: Dict = None) -> TaskInfo:
-        """创建任务"""
+
+    def get_waypoint(self, waypoint_id: int) -> Optional[WaypointInfo]:
         try:
-            result = self._request(
+            payload = self._request("GET", f"/api/waypoints/{waypoint_id}")
+            data = self._extract_data(payload) or {}
+            return WaypointInfo(
+                id=int(data["id"]),
+                name=str(data["name"]),
+                map_id=int(data.get("map_id", 0)),
+                x=float(data.get("x", 0.0) or 0.0),
+                y=float(data.get("y", 0.0) or 0.0),
+                z=float(data.get("z", 0.0) or 0.0),
+                yaw=float(data.get("yaw", 0.0) or 0.0),
+                type=str(data.get("type", "normal")),
+            )
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Navigation
+    # ------------------------------------------------------------------
+
+    def start_navigation(self, map_id: int) -> bool:
+        """
+        Load or activate a map before waypoint navigation.
+
+        If your robot does not require an explicit map-open step, you can simply:
+        - store `self._current_map_id = map_id`
+        - return True
+        """
+
+        try:
+            self._request("POST", "/api/navigation/start", data={"map_id": map_id})
+            self._current_map_id = map_id
+            self._nav_running = True
+            return True
+        except Exception:
+            return False
+
+    def stop_navigation(self) -> bool:
+        try:
+            self._request("POST", "/api/navigation/stop")
+            self._nav_running = False
+            return True
+        except Exception:
+            return False
+
+    def goto_waypoint(self, waypoint_id: int) -> bool:
+        try:
+            self._request("POST", "/api/navigation/goto_waypoint", data={"waypoint_id": waypoint_id})
+            self._nav_running = True
+            return True
+        except Exception:
+            return False
+
+    def goto_point(self, x: float, y: float, yaw: float = 0.0) -> bool:
+        try:
+            self._request(
                 "POST",
-                "/api/tasks/create",
-                data={
-                    "name": name,
-                    "description": description,
-                    "program": program or {}
-                }
+                "/api/navigation/goto_point",
+                data={"x": x, "y": y, "yaw": yaw},
             )
-            
-            data = result.get("data", {})
-            return TaskInfo(
-                id=data["id"],
-                name=data["name"],
-                description=data.get("description", "")
-            )
-        except Exception as e:
-            raise AdapterError(f"创建任务失败: {e}")
-    
+            self._nav_running = True
+            return True
+        except Exception:
+            return False
+
+    def navigate_to(self, target: str) -> bool:
+        """
+        High-level semantic navigation used by MissionManager.
+
+        There are two common implementation choices:
+
+        Option A: your API already supports name-based navigation
+            POST /api/navigation/goto_by_name {"target": "大厅"}
+
+        Option B: resolve the name to a waypoint ID first, then call goto_waypoint()
+
+        The template below implements Option B because it works for more vendors.
+        """
+
+        if not target:
+            return False
+
+        # Convention: if the target is a dock/charge point, route to docking.
+        lowered = str(target).lower()
+        if any(token in lowered for token in ("dock", "charge")) or any(
+            token in str(target) for token in ("回充", "充电", "回桩")
+        ):
+            return self.execute_docking_async()
+
+        map_id = self._current_map_id
+        if map_id is None:
+            maps = self.list_maps()
+            if maps:
+                map_id = maps[0].id
+                self._current_map_id = map_id
+
+        if map_id is None:
+            return False
+
+        for waypoint in self.list_waypoints(map_id):
+            if waypoint.name == target or target in waypoint.name or waypoint.name in target:
+                return self.goto_waypoint(waypoint.id)
+        return False
+
+    def execute_docking_async(self) -> bool:
+        """
+        Replace this with your robot's dock / charge / return-to-base API.
+
+        If your robot has no docking capability, return False and avoid using `dock`
+        in tasks for that deployment.
+        """
+
+        try:
+            payload = {"map_id": self._current_map_id} if self._current_map_id is not None else None
+            self._request("POST", "/api/navigation/dock", data=payload)
+            self._nav_running = True
+            return True
+        except Exception:
+            return False
+
+    def wait_nav_started(self, timeout: int = 15) -> bool:
+        """
+        Optional helper used by submit_mission when a map must be activated first.
+
+        If your API is synchronous and returns success only after navigation is ready,
+        you can simply return True here.
+        """
+
+        return True
+
+    def resolve_current_map(self) -> Optional[MapInfo]:
+        if self._current_map_id is None:
+            return None
+        return MapInfo(
+            id=int(self._current_map_id),
+            name=str(self._current_map_name or self._current_map_id),
+        )
+
+    # ------------------------------------------------------------------
+    # Human-facing actions
+    # ------------------------------------------------------------------
+
+    def prepare_for_movement(self) -> bool:
+        """
+        Called before `goto` / `dock`.
+
+        Replace this if your robot must stand up, undock, unlock motors, or switch
+        mode before navigation. Returning True is acceptable if no preparation is
+        required.
+        """
+
+        return True
+
+    def set_light(self, color: Any) -> bool:
+        """
+        Replace `/api/light/set` and the payload mapping with your vendor API.
+        """
+
+        try:
+            self._request("POST", "/api/light/set", data={"color": color})
+            return True
+        except Exception:
+            return False
+
+    def play_audio(self, text: str) -> bool:
+        """
+        Replace `/api/audio/tts` with your TTS or speaker endpoint.
+        """
+
+        try:
+            self._request("POST", "/api/audio/tts", data={"text": text})
+            return True
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # Task API (optional in many deployments)
+    # ------------------------------------------------------------------
+
+    def list_tasks(self) -> List[TaskInfo]:
+        """
+        If your robot does not expose a task API, returning [] is acceptable.
+        """
+
+        try:
+            payload = self._request("GET", "/api/tasks")
+            data = self._extract_data(payload) or []
+            items = data.get("tasks", data) if isinstance(data, dict) else data
+            result: List[TaskInfo] = []
+            for item in items or []:
+                result.append(
+                    TaskInfo(
+                        id=int(item["id"]),
+                        name=str(item["name"]),
+                        description=str(item.get("description", "")),
+                        status=str(item.get("status", "idle")),
+                    )
+                )
+            return result
+        except Exception:
+            return []
+
     def run_task(self, task_id: int) -> bool:
-        """运行任务"""
         try:
-            result = self._request("POST", f"/api/tasks/{task_id}/run")
-            return result.get("code", -1) == 0
-        except Exception as e:
+            self._request("POST", f"/api/tasks/{task_id}/run")
+            return True
+        except Exception:
             return False
-    
+
     def cancel_task(self) -> bool:
-        """取消当前任务"""
         try:
-            result = self._request("POST", "/api/tasks/cancel")
-            return result.get("code", -1) == 0
-        except Exception as e:
+            self._request("POST", "/api/tasks/cancel")
+            return True
+        except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Optional callback / websocket integration
+    # ------------------------------------------------------------------
 
-# ========== 工厂函数 ==========
+    def handle_callback_event(self, event: Dict[str, Any]) -> None:
+        """
+        Update internal state from vendor callbacks or websocket events.
+
+        Recommended mappings:
+        - navigation started   -> self._nav_running = True
+        - arrived              -> self._nav_running = False
+        - dock completed       -> self._nav_running = False; self._charging = True
+        - battery update       -> self._battery_soc = ...
+        - pose update          -> self._current_pose = ...
+
+        If you also publish EventBus events elsewhere, keep the state updates here.
+        """
+
+        event_name = str(event.get("event") or event.get("type") or "").lower()
+        if event_name in {"arrived", "nav_arrived"}:
+            self._nav_running = False
+        elif event_name in {"dock_completed", "dock_success"}:
+            self._nav_running = False
+            self._charging = True
+
 
 def create_your_robot_adapter(
-    host: str = "192.168.1.100",
+    host: str = "127.0.0.1",
     port: int = 8080,
     api_key: str = "",
-    **kwargs
+    protocol: str = "http",
+    timeout: int = 15,
+    **kwargs: Any,
 ) -> YourRobotAdapter:
     """
-    工厂函数：创建 YourRobot 适配器
-    
-    用法:
+    Factory function used by external code when it wants a custom adapter instance.
+
+    Typical usage:
+
         adapter = create_your_robot_adapter(
-            host="192.168.1.100",
+            host="10.0.0.20",
             port=8080,
-            api_key="your-api-key"
+            api_key="replace-me",
         )
-        
-        if adapter.connect()["success"]:
-            print("连接成功")
-            adapter.goto_location("会议室")
-    
-    Args:
-        host: 机器人IP地址
-        port: API端口
-        api_key: API认证密钥
-        **kwargs: 其他参数
-        
-    Returns:
-        YourRobotAdapter 实例
     """
+
     return YourRobotAdapter(
         host=host,
         port=port,
         api_key=api_key,
-        **kwargs
+        protocol=protocol,
+        timeout=timeout,
+        **kwargs,
     )

@@ -155,6 +155,19 @@ class MissionManager:
             self._log("[小脑] 已下发回充，等待回充完成回调...")
             return
 
+        if action == "stop_nav":
+            try:
+                ok = bool(self.adapter.stop_navigation())
+            except Exception as exc:
+                ok = False
+                self.last_error = f"stop_nav failed: {exc}"
+            if not ok:
+                self.event_bus.publish("action_failed", {"action": "stop_nav"})
+                return
+            self._log("[Mission] navigation stopped")
+            self._execute_next()
+            return
+
         if action == "wait_confirm":
             reminder_text = str(task.get("reminder_text") or "").strip()
             if not reminder_text:

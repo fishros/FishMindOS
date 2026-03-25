@@ -260,3 +260,20 @@
 - `system_status`
 
 然后直接用自然语言回答，不生成 `submit_mission`。
+
+---
+
+## stop_nav 规则补充
+
+- 当用户要求“关闭导航 / 停止导航 / 取消当前导航”时，这属于动作执行，不属于状态查询。
+- 此时应调用 `submit_mission`，并生成：
+
+```json
+{
+  "tasks": [
+    {"action": "stop_nav"}
+  ]
+}
+```
+
+- 不要把“关闭导航”错误规划成 `system_status`。
