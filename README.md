@@ -6,7 +6,7 @@ FishMindOS 是一套面向机器狗的中文任务控制框架。
 当前仓库主要保留了两条运行链：
 
 - 真实链路：`python -m fishmindos`
-- 仿真链路：`python mock_fishmindos.py` 和 `python mock_system.py`
+- 仿真链路：`python mock_fishmindos.py`
 
 本文档会说明：
 
@@ -39,17 +39,12 @@ FishMindOS 是一套面向机器狗的中文任务控制框架。
 
 ### 1.2 仿真运行链
 
-仓库中有两种 mock：
+仓库中保留一个 mock 入口：
 
 - `mock_fishmindos.py`
   - 使用真实 LLM
   - 使用假的机器人适配器
   - 适合测试“LLM 会不会排对任务”
-
-- `mock_system.py`
-  - 保留 FishMindOS 的主要骨架
-  - 使用 mock 适配器
-  - 更适合做离线结构验证和基础演示
 
 ### 1.3 核心分层
 
@@ -84,7 +79,6 @@ FishMindOS/
 ├─ fishmindos.config.json
 ├─ fishmindos.config.example.json
 ├─ mock_fishmindos.py
-├─ mock_system.py
 ├─ docs/
 └─ fishmindos/
    ├─ __init__.py
@@ -124,11 +118,6 @@ FishMindOS/
 
 - 真 LLM + 假机器人
 - 主要测试规划能力、任务拆解能力、工具调用顺序
-
-`mock_system.py`
-
-- 简化版 mock 系统
-- 保留大体框架，便于离线结构验证
 
 ### 3.2 `fishmindos/` 包入口与配置
 
@@ -524,7 +513,7 @@ python -m fishmindos --nav-server <host> --nav-app <host>
 
 ### 5.2 仿真链路启动
 
-#### 方案 A：测真实 LLM 的规划能力
+#### 方案：测真实 LLM 的规划能力
 
 ```bash
 python mock_fishmindos.py
@@ -536,12 +525,6 @@ python mock_fishmindos.py
 - 是否会正确插入 `system_wait`
 - 是否能识别“完成后亮灯/完成后播报”
 - 是否会生成多余步骤
-
-#### 方案 B：做轻量 mock 验证
-
-```bash
-python mock_system.py
-```
 
 适合测试：
 
@@ -819,7 +802,7 @@ python mock_system.py
 - `adapters/` 负责对接真实能力
 - `brain/` 负责规划和决策
 - `interaction/` 负责终端与回调入口
-- `mock_*` 负责仿真验证
+- `mock_fishmindos.py` 负责仿真验证
 
 如果以后你继续裁剪仓库，建议优先保住这几块：
 

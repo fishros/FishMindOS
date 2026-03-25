@@ -4,7 +4,10 @@ FishMindOS Mock - 真实 LLM + Mock Adapter
 """
 
 import sys
+import threading
+import time
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 # 确保可以导入 fishmindos
 sys.path.insert(0, str(Path(__file__).parent))
@@ -12,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # 替换 adapters 模块中的 FishBotAdapter
 import fishmindos.adapters as adapters_module
 from fishmindos.adapters.base import RobotAdapter, MapInfo, WaypointInfo, TaskInfo, RobotStatus
+from fishmindos.core.event_bus import global_event_bus
 
 class MockFishBotAdapter(RobotAdapter):
     """
@@ -66,6 +70,11 @@ class MockFishBotAdapter(RobotAdapter):
         self._nav_running = False
         self._current_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._battery = 85.0
+        self._charging = False
+        self._motion_ready = False
+        self._state_lock = threading.RLock()
+        self._mock_nav_delay_sec = 0.8
+        self._mock_dock_delay_sec = 1.2
         
         print(f"[MOCK] Adapter 初始化: {nav_server_host}:{nav_server_port}")
     
@@ -88,6 +97,41 @@ class MockFishBotAdapter(RobotAdapter):
     def disconnect(self) -> None:
         self._connected = False
         print("[MOCK] 断开连接")
+
+    def _event_stream_enabled(self) -> bool:
+        return True
+
+    def _find_waypoint(self, target: str) -> Optional[Dict[str, Any]]:
+        if not target:
+            return None
+        map_id = self._current_map_id or 51
+        waypoints = self._mock_waypoints.get(map_id, [])
+        for wp in waypoints:
+            if wp["name"] == target:
+                return wp
+        for wp in waypoints:
+            if target in wp["name"] or wp["name"] in target:
+                return wp
+        return None
+
+    def _find_dock_waypoint(self, map_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        target_map_id = map_id or self._current_map_id or 51
+        for wp in self._mock_waypoints.get(target_map_id, []):
+            if "回充" in wp["name"] or "充电" in wp["name"] or "dock" in wp["name"].lower():
+                return wp
+        return None
+
+    def _publish_after_delay(self, delay_sec: float, event_type: str, payload: Dict[str, Any]) -> None:
+        def _worker() -> None:
+            time.sleep(delay_sec)
+            print(f"[MOCK EVENT] {event_type} -> {payload}")
+            global_event_bus.publish(event_type, payload)
+
+        threading.Thread(
+            target=_worker,
+            name=f"mock-{event_type}",
+            daemon=True,
+        ).start()
     
     # ========== 地图操作 ==========
     def list_maps(self):
@@ -98,13 +142,16 @@ class MockFishBotAdapter(RobotAdapter):
         if map_id is None:
             map_id = self._current_map_id or (self._mock_maps[0]["id"] if self._mock_maps else 1)
         print(f"[MOCK] start_navigation(map_id={map_id})")
-        self._current_map_id = map_id
-        self._nav_running = True
+        with self._state_lock:
+            self._current_map_id = map_id
+            self._nav_running = True
+            self._charging = False
         return True
     
     def stop_navigation(self) -> bool:
         print("[MOCK] stop_navigation()")
-        self._nav_running = False
+        with self._state_lock:
+            self._nav_running = False
         return True
     
     def get_navigation_status(self) -> dict:
@@ -131,10 +178,92 @@ class MockFishBotAdapter(RobotAdapter):
     def goto_dock(self, map_id: int = None) -> bool:
         print(f"[MOCK] goto_dock(map_id={map_id})")
         return True
+
+    def prepare_for_movement(self) -> bool:
+        return self.motion_stand()
+
+    def navigate_to(self, target: str) -> bool:
+        if not target:
+            return False
+
+        lowered = str(target).lower()
+        if any(keyword in lowered or keyword in target for keyword in ["回充", "充电", "回桩", "dock"]):
+            return self.execute_docking_async()
+
+        waypoint = self._find_waypoint(str(target))
+        if waypoint is None:
+            print(f"[MOCK] navigate_to(target='{target}') - waypoint not found")
+            return False
+
+        print(f"[MOCK] navigate_to(target='{target}')")
+        with self._state_lock:
+            self._nav_running = True
+            self._charging = False
+
+        def _complete_navigation() -> None:
+            with self._state_lock:
+                self._current_pose = {"x": waypoint["x"], "y": waypoint["y"], "yaw": 0.0}
+                self._nav_running = False
+            self._publish_after_delay(
+                0.0,
+                "nav_arrived",
+                {
+                    "event": "mock_nav_arrived",
+                    "target": waypoint["name"],
+                    "waypoint_id": waypoint["id"],
+                    "map_id": self._current_map_id,
+                },
+            )
+
+        threading.Thread(
+            target=lambda: (time.sleep(self._mock_nav_delay_sec), _complete_navigation()),
+            name="mock-nav-arrival",
+            daemon=True,
+        ).start()
+        return True
+
+    def execute_docking_async(self) -> bool:
+        dock = self._find_dock_waypoint(self._current_map_id)
+        print(f"[MOCK] execute_docking_async(map_id={self._current_map_id})")
+        with self._state_lock:
+            self._nav_running = True
+            self._charging = False
+
+        def _complete_docking() -> None:
+            with self._state_lock:
+                if dock is not None:
+                    self._current_pose = {"x": dock["x"], "y": dock["y"], "yaw": 0.0}
+                self._nav_running = False
+                self._charging = True
+            self._publish_after_delay(
+                0.0,
+                "dock_completed",
+                {
+                    "event": "mock_dock_completed",
+                    "map_id": self._current_map_id,
+                },
+            )
+
+        threading.Thread(
+            target=lambda: (time.sleep(self._mock_dock_delay_sec), _complete_docking()),
+            name="mock-dock-complete",
+            daemon=True,
+        ).start()
+        return True
+
+    def get_basic_status(self) -> dict:
+        with self._state_lock:
+            return {
+                "nav_running": self._nav_running,
+                "charging": self._charging,
+                "battery_soc": self._battery,
+                "current_pose": self._current_pose.copy(),
+            }
     
     # ========== 运动控制 ==========
     def motion_stand(self) -> bool:
         print("[MOCK] motion_stand()")
+        self._motion_ready = True
         return True
     
     def motion_lie_down(self) -> bool:
@@ -169,7 +298,7 @@ class MockFishBotAdapter(RobotAdapter):
     def get_status(self):
         return RobotStatus(
             nav_running=self._nav_running,
-            charging=False,
+            charging=self._charging,
             battery_soc=self._battery,
             current_pose=self._current_pose
         )
@@ -241,7 +370,7 @@ class MockFishBotAdapter(RobotAdapter):
     
     def get_battery(self):
         print("[MOCK] get_battery()")
-        return {"soc": 85.0, "charging": False}
+        return {"soc": self._battery, "charging": self._charging}
 
     def get_mock_world(self):
         """返回用于规划测试的静态场景信息。"""

@@ -56,6 +56,15 @@ class FishBotAdapter(RobotAdapter):
             "dock_complete_at": None,
             "charging": None,
         }
+        self._battery_state_lock = threading.Lock()
+        self._battery_state: Dict[str, Any] = {
+            "soc": None,
+            "state_samples": [],
+            "charging": None,
+            "last_soc_at": None,
+            "last_state_at": None,
+        }
+        self._battery_topics_registered = False
         
         # WebSocket客户端（用于灯光控制等）
         self.ws_client: Optional[RosbridgeClient] = None
@@ -93,6 +102,55 @@ class FishBotAdapter(RobotAdapter):
             raise FishBotAPIError(f"HTTP {e.code}: {e.reason}")
         except Exception as e:
             raise FishBotAPIError(f"请求失败: {e}")
+
+    def _handle_bms_soc(self, msg: Dict[str, Any]) -> None:
+        try:
+            soc = msg.get("data")
+            if soc is None:
+                return
+            with self._battery_state_lock:
+                self._battery_state["soc"] = float(soc)
+                self._battery_state["last_soc_at"] = time.time()
+        except (TypeError, ValueError, AttributeError):
+            return
+
+    def _handle_bms_state(self, msg: Dict[str, Any]) -> None:
+        try:
+            state = msg.get("data")
+            if state is None:
+                return
+            current = float(state)
+        except (TypeError, ValueError, AttributeError):
+            return
+
+        with self._battery_state_lock:
+            samples = self._battery_state.setdefault("state_samples", [])
+            samples.append(current)
+            if len(samples) > 5:
+                del samples[:-5]
+            self._battery_state["last_state_at"] = time.time()
+            if samples:
+                avg_current = sum(samples) / len(samples)
+                self._battery_state["charging"] = avg_current > 1.0
+
+    def _register_battery_topics(self) -> None:
+        if self._battery_topics_registered:
+            return
+        if not (self.ws_client and self.ws_client.connected):
+            return
+        self.ws_client.on_topic("/bms_soc", self._handle_bms_soc)
+        self.ws_client.on_topic("/bms_state", self._handle_bms_state)
+        self._battery_topics_registered = True
+
+    def _get_cached_battery_snapshot(self) -> Dict[str, Any]:
+        with self._battery_state_lock:
+            return {
+                "soc": self._battery_state.get("soc"),
+                "state_samples": list(self._battery_state.get("state_samples", [])),
+                "charging": self._battery_state.get("charging"),
+                "last_soc_at": self._battery_state.get("last_soc_at"),
+                "last_state_at": self._battery_state.get("last_state_at"),
+            }
     
     def connect(self) -> Dict[str, Any]:
         """
@@ -147,6 +205,7 @@ class FishBotAdapter(RobotAdapter):
             )
             if self.ws_client.connect():
                 self.ws_client.on_nav_event(self._handle_ws_nav_event)
+                self._register_battery_topics()
                 results["rosbridge"]["connected"] = True
             else:
                 results["rosbridge"]["error"] = "WebSocket连接失败"
@@ -831,6 +890,12 @@ class FishBotAdapter(RobotAdapter):
         except:
             pass
 
+        battery_snapshot = self._get_cached_battery_snapshot()
+        if status.battery_soc is None and battery_snapshot.get("soc") is not None:
+            status.battery_soc = battery_snapshot.get("soc")
+        if battery_snapshot.get("charging") is not None:
+            status.charging = bool(battery_snapshot.get("charging"))
+
         callback_state = self.get_callback_state()
         if self._has_live_callback_state():
             if callback_state.get("nav_running") is not None and self._should_prefer_callback_nav_state(callback_state):
@@ -843,73 +908,49 @@ class FishBotAdapter(RobotAdapter):
         return status
     
     def get_battery(self) -> Dict[str, Any]:
-        """获取电量信息 - 快速判断充电状态"""
-        
-        import time
-        
-        # 策略：只需2-3个样本点快速判断
-        # 充电时的特征：平均电流 > 1.0A（过滤噪声和瞬时波动）
-        
+        """获取电量信息，优先使用后台缓存的电池话题数据。"""
         if not (self.ws_client and self.ws_client.connected):
+            try:
+                result = self._request("GET", "/api/nav/status/health")
+                data = result.get("data", {})
+                if isinstance(data, dict):
+                    return {
+                        "soc": data.get("battery_level"),
+                        "charging": data.get("charging"),
+                    }
+            except Exception:
+                pass
             return {"soc": None, "charging": None, "error": "WebSocket not connected"}
-        
-        try:
-            battery_data = {
-                "soc": None,
-                "state_samples": [],
-                "charging": None
+
+        self._register_battery_topics()
+
+        snapshot = self._get_cached_battery_snapshot()
+        if snapshot.get("soc") is not None:
+            return {
+                "soc": snapshot.get("soc"),
+                "charging": snapshot.get("charging"),
             }
-            
-            def on_bms_soc(msg):
-                try:
-                    soc = msg.get("data")
-                    if soc is not None:
-                        battery_data["soc"] = float(soc)
-                except (TypeError, ValueError, AttributeError):
-                    pass
-            
-            def on_bms_state(msg):
-                try:
-                    state = msg.get("data")
-                    if state is not None:
-                        battery_data["state_samples"].append(float(state))
-                        # 只保留最后 5 个样本
-                        if len(battery_data["state_samples"]) > 5:
-                            battery_data["state_samples"].pop(0)
-                except (TypeError, ValueError, AttributeError):
-                    pass
-            
-            self.ws_client.on_topic("/bms_soc", on_bms_soc)
-            self.ws_client.on_topic("/bms_state", on_bms_state)
-            
-            # 快速采样：只需 2-3 个点（约 200-300ms）
-            print("[Battery] 采样电流数据...")
-            for i in range(30):  # 最多 3 秒的等待
-                # 只要有 SOC 和至少 2 个电流点就返回
-                if battery_data["soc"] is not None and len(battery_data["state_samples"]) >= 2:
-                    break
+
+        # 首次启动后可能还没收到电池话题，给一个短暂窗口等待缓存填充。
+        try:
+            for _ in range(10):  # 最多等待 1 秒
                 time.sleep(0.1)
-            
-            if battery_data["soc"] is not None and battery_data["state_samples"]:
-                # 计算平均电流
-                avg_current = sum(battery_data["state_samples"]) / len(battery_data["state_samples"])
-                
-                # 【改进】：充电判断标准更宽松
-                # 只要平均电流 > 1.0A 就认为在充电
-                # 这样能避免被小的噪声和波动影响
-                battery_data["charging"] = avg_current > 1.0
-                
-                print(f"[Battery] SOC: {battery_data['soc']:.1f}%, 电流: {avg_current:.1f}A, 充电: {battery_data['charging']}")
-                
+                snapshot = self._get_cached_battery_snapshot()
+                if snapshot.get("soc") is not None:
+                    return {
+                        "soc": snapshot.get("soc"),
+                        "charging": snapshot.get("charging"),
+                    }
+
+            result = self._request("GET", "/api/nav/status/health")
+            data = result.get("data", {})
+            if isinstance(data, dict):
                 return {
-                    "soc": battery_data["soc"],
-                    "charging": battery_data["charging"]
+                    "soc": data.get("battery_level"),
+                    "charging": data.get("charging"),
                 }
-            
-            return {"soc": None, "charging": None, "error": "Incomplete battery data"}
-                    
+            return {"soc": None, "charging": snapshot.get("charging"), "error": "Incomplete battery data"}
         except Exception as e:
-            print(f"[Battery] 异常: {e}")
             return {"soc": None, "charging": None, "error": f"Exception: {e}"}
     
     # ========== 动作操作 ==========

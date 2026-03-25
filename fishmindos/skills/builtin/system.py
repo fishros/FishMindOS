@@ -128,6 +128,21 @@ class GetStatusSkill(Skill):
         status = self.adapter.get_status()
         self._sync_current_map(context)
 
+        query_text = str(context.user_text or context.get("last_input", "") or "")
+        wants_battery = any(keyword in query_text for keyword in ["电量", "电池", "还有多少电", "多少电"])
+        if wants_battery and status.battery_soc is None and hasattr(self.adapter, "get_battery"):
+            try:
+                battery = self.adapter.get_battery()
+            except Exception:
+                battery = {}
+            if isinstance(battery, dict):
+                soc = battery.get("soc")
+                charging = battery.get("charging")
+                if soc is not None:
+                    status.battery_soc = soc
+                if charging is not None:
+                    status.charging = bool(charging)
+
         parts = []
         if status.nav_running:
             parts.append("正在导航")

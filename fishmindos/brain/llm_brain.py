@@ -748,6 +748,7 @@ class LLMBrain:
             no_step_rounds = 0
             terminal_error_emitted = False
             submit_mission_pending = False
+            status_query_completed = False
             
             while iteration < max_iterations:
                 iteration += 1
@@ -938,6 +939,10 @@ class LLMBrain:
                                 
                                 executed_steps.append(step_key)
                                 executed_any_step = True
+                                if function_name == "system_status" and self._is_simple_status_query(user_input):
+                                    status_query_completed = True
+                                    if success and result_content:
+                                        final_text = result_content
                                 
                                 # 更新连续失败计数
                                 if success:
@@ -985,6 +990,8 @@ class LLMBrain:
                     
                     # 如果连续失败过多，跳出循环
                     if consecutive_failures >= 2:
+                        break
+                    if status_query_completed:
                         break
                     if self.session_context.get("planning_only") and round_steps:
                         if self._planning_requirements_met(user_input, all_steps):
