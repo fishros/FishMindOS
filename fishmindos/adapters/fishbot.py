@@ -954,12 +954,9 @@ class FishBotAdapter(RobotAdapter):
             return {"soc": None, "charging": None, "error": f"Exception: {e}"}
     
     # ========== 动作操作 ==========
-    def motion_stand(self) -> bool:
-        """站立 - 通过/cmd_vel发送z轴正值"""
+    def _send_stand_command(self, emit_log: bool = True) -> bool:
         try:
             if self.ws_client and self.ws_client.connected:
-                # 发送站立命令 (z轴速度 > 0)，通过设置合适的速度组合
-                # 实际上，通常站立是通过设置z轴linear.z为正
                 success = self.ws_client.publish(
                     "/cmd_vel",
                     {
@@ -968,15 +965,21 @@ class FishBotAdapter(RobotAdapter):
                     },
                     msg_type="geometry_msgs/msg/Twist"
                 )
-                if success:
-                    print("[Motion] Stand command sent via WebSocket (z=1.0)")
-                    return True
-            
-            print("[Motion] Stand: WebSocket not available")
+                if success and emit_log:
+                    print("   [Motion] Stand command sent via WebSocket (z=1.0)")
+                return bool(success)
+
+            if emit_log:
+                print("   [Motion] Stand: WebSocket not available")
             return False
         except Exception as e:
-            print(f"[Motion] Stand failed: {e}")
+            if emit_log:
+                print(f"   [Motion] Stand failed: {e}")
             return False
+
+    def motion_stand(self) -> bool:
+        """站立 - 通过/cmd_vel发送z轴正值"""
+        return self._send_stand_command(emit_log=True)
     
     def motion_lie_down(self) -> bool:
         """趴下 - 通过/cmd_vel发送z轴负值"""
@@ -1004,10 +1007,19 @@ class FishBotAdapter(RobotAdapter):
     # ========== Mission Executor兼容接口 ==========
     def prepare_for_movement(self) -> bool:
         """MissionExecutor 兼容：统一准备移动动作。"""
-        return self.motion_stand()
+        success = False
+        attempts = 3
+        for attempt in range(attempts):
+            success = self._send_stand_command(emit_log=(attempt == 0)) or success
+            if attempt < attempts - 1:
+                time.sleep(0.15)
+
+        if success:
+            print(f"   [Motion] Stand reinforcement sent x{attempts}")
+        return success
 
     def _ensure_navigation_started_for_mission(self, map_id: Optional[int]) -> bool:
-        """Best-effort: ensure nav service is started on a map before goto_waypoint."""
+        """Best-effort: ensure the target map is ready before goto_waypoint."""
         nav_running = False
         nav_map_id = None
         try:
@@ -1024,9 +1036,6 @@ class FishBotAdapter(RobotAdapter):
             except (TypeError, ValueError):
                 pass
 
-        if nav_running and (map_id is None or nav_map_id == map_id):
-            return True
-
         if map_id is None:
             map_info = self.resolve_current_map()
             if map_info:
@@ -1039,6 +1048,30 @@ class FishBotAdapter(RobotAdapter):
             map_id = int(map_id)
         except (TypeError, ValueError):
             return False
+
+        callback_state = self.get_callback_state()
+        callback_map_id = callback_state.get("current_map_id")
+        if callback_map_id is not None:
+            try:
+                callback_map_id = int(callback_map_id)
+            except (TypeError, ValueError):
+                pass
+
+        last_event = str(callback_state.get("last_event") or "").strip().lower()
+        explicit_nav_stop = self._is_nav_stop_event(last_event)
+
+        # Once a map has been opened and not explicitly stopped, subsequent goto calls on the
+        # same map should not re-open navigation just because the robot is idle after arrival.
+        if nav_map_id == map_id:
+            return True
+        if (
+            callback_map_id == map_id
+            and callback_state.get("nav_started_at")
+            and not explicit_nav_stop
+        ):
+            return True
+        if nav_running and (map_id is None or nav_map_id == map_id):
+            return True
 
         if not self.start_navigation(map_id):
             return False

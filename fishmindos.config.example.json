@@ -1,61 +1,32 @@
 {
-  "adapter": {
-    "type": "mock",
-    "battery": 85.0,
-    "position": {"x": 1.0, "y": 2.0},
-    "nav_delay": 2.0
-  },
   "llm": {
     "provider": "zhipu",
-    "base_url": "",
-    "api_url": "",
-    "model": "glm-5",
     "api_key": "replace-with-your-api-key",
-    "timeout_sec": 90,
-    "max_tokens": 1024,
-    "retry_count": 1,
-    "prompt_mode": "full"
+    "base_url": null,
+    "model": "glm-4.5-air",
+    "temperature": 0.2,
+    "max_tokens": 2000,
+    "timeout": 30
   },
-  "nav": {
-    "scheme": "http",
+  "nav_server": {
     "host": "127.0.0.1",
-    "port": 9002,
-    "base_url": "",
-    "timeout_sec": 15,
-    "auth_token": "",
-    "username": "",
-    "password": ""
+    "port": 9001
+  },
+  "nav_app": {
+    "host": "127.0.0.1",
+    "port": 9002
   },
   "rosbridge": {
-    "ws_url": "",
-    "scheme": "ws",
     "host": "127.0.0.1",
-    "port": 8888,
+    "port": 9090,
     "path": "/api/rt",
-    "timeout_sec": 5,
-    "motion_presets": {
-      "stand": {
-        "linear_z": 1.0
-      },
-      "lie_down": {
-        "linear_z": -1.0
-      }
-    }
+    "use_ssl": false
   },
-  "planner": {
-    "motion_aliases": {
-      "站立": "stand",
-      "起立": "stand",
-      "站起来": "stand",
-      "趴下": "lie_down",
-      "卧倒": "lie_down"
-    }
-  },
-  "task_chains": {
-    "storage_file": "task_chains.json"
-  },
-  "world_model": {
-    "default_map_name": "26层"
+  "websocket": {
+    "enabled": true,
+    "reconnect_interval": 5,
+    "max_reconnect_attempts": 10,
+    "ping_interval": 30
   },
   "callback": {
     "enabled": false,
@@ -82,10 +53,19 @@
     "wait_confirm_reminder_interval_sec": 20,
     "wait_confirm_reminder_text": "请确认后我再继续执行。"
   },
+  "skills": {
+    "search_paths": [
+      "skill_store",
+      "skills",
+      "custom_skills"
+    ],
+    "hot_reload": false,
+    "auto_discover": true
+  },
   "app": {
     "debug": false,
     "log_level": "INFO",
-    "identity": "机器人助手",
+    "identity": "你的机器人名字",
     "prompt_profile": null,
     "language": "zh"
   }

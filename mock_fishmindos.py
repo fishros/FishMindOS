@@ -15,7 +15,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 # 替换 adapters 模块中的 FishBotAdapter
 import fishmindos.adapters as adapters_module
 from fishmindos.adapters.base import RobotAdapter, MapInfo, WaypointInfo, TaskInfo, RobotStatus
+from fishmindos.config import get_config
 from fishmindos.core.event_bus import global_event_bus
+from fishmindos.world import WorldStore
 
 class MockFishBotAdapter(RobotAdapter):
     """
@@ -32,40 +34,12 @@ class MockFishBotAdapter(RobotAdapter):
         self.nav_server_base = f"http://{nav_server_host}:{nav_server_port}"
         self.nav_app_base = f"http://{nav_app_host}:{nav_app_port}"
         self._connected = False
-        self._current_map_id = 51
-        
-        # Mock 数据
-        self._mock_maps = [
-            {"id": 51, "name": "26层", "description": "26楼办公区"},
-            {"id": 52, "name": "3层", "description": "3楼大厅"},
-            {"id": 1, "name": "1层", "description": "1楼公共区域"},
-            {"id": 99, "name": "last", "description": "上次地图"},
-        ]
-        
-        self._mock_waypoints = {
-            51: [
-                {"id": 101, "name": "大厅", "x": 10.0, "y": 20.0},
-                {"id": 102, "name": "会议室", "x": 30.0, "y": 40.0},
-                {"id": 103, "name": "厕所", "x": 25.0, "y": 35.0},
-                {"id": 104, "name": "回充点", "x": 5.0, "y": 5.0},
-            ],
-            52: [
-                {"id": 201, "name": "前台", "x": 15.0, "y": 25.0},
-                {"id": 202, "name": "厕所", "x": 20.0, "y": 30.0},
-                {"id": 203, "name": "回充点", "x": 5.0, "y": 5.0},
-            ],
-            1: [
-                {"id": 301, "name": "入口", "x": 0.0, "y": 0.0},
-                {"id": 302, "name": "前台", "x": 10.0, "y": 10.0},
-                {"id": 303, "name": "休息区", "x": 20.0, "y": 20.0},
-                {"id": 304, "name": "厕所", "x": 15.0, "y": 15.0},
-                {"id": 305, "name": "回充点", "x": 5.0, "y": 5.0},
-            ],
-            99: [
-                {"id": 901, "name": "默认位置", "x": 0.0, "y": 0.0},
-                {"id": 902, "name": "回充点", "x": 5.0, "y": 5.0},
-            ]
-        }
+        self._current_map_id = None
+        self._mock_maps = []
+        self._mock_waypoints = {}
+        self._mock_waypoint_aliases: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        self._world_path: Optional[Path] = None
+        self._world_path_mtime: Optional[float] = None
         
         self._nav_running = False
         self._current_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
@@ -75,6 +49,7 @@ class MockFishBotAdapter(RobotAdapter):
         self._state_lock = threading.RLock()
         self._mock_nav_delay_sec = 0.8
         self._mock_dock_delay_sec = 1.2
+        self._refresh_mock_world(force=True)
         
         print(f"[MOCK] Adapter 初始化: {nav_server_host}:{nav_server_port}")
     
@@ -101,23 +76,191 @@ class MockFishBotAdapter(RobotAdapter):
     def _event_stream_enabled(self) -> bool:
         return True
 
+    def _default_mock_payload(self) -> tuple[list, dict]:
+        maps = [{"id": 999, "name": "default", "description": "fallback mock map"}]
+        waypoints = {
+            999: [
+                {"id": 99901, "name": "大厅", "x": 10.0, "y": 20.0, "aliases": []},
+                {"id": 99902, "name": "卫生间", "x": 25.0, "y": 35.0, "aliases": ["厕所"]},
+                {"id": 99903, "name": "路点3", "x": 18.0, "y": 12.0, "aliases": []},
+                {"id": 99904, "name": "回充点", "x": 5.0, "y": 5.0, "aliases": ["充电点", "回充", "回桩"]},
+            ]
+        }
+        return maps, waypoints
+
+    def _resolve_world_path(self) -> Optional[Path]:
+        try:
+            cfg = get_config()
+        except Exception:
+            return None
+
+        world_cfg = getattr(cfg, "world", None)
+        if world_cfg is None or not getattr(world_cfg, "enabled", False):
+            return None
+
+        raw_path = getattr(world_cfg, "path", None)
+        if not raw_path:
+            return None
+
+        world_path = Path(raw_path)
+        if not world_path.is_absolute():
+            world_path = Path.cwd() / world_path
+        return world_path
+
+    def _build_mock_data_from_world(self, world_path: Path) -> tuple[list, dict]:
+        world = WorldStore(world_path).load()
+
+        maps: list[dict[str, Any]] = []
+        map_name_to_id: Dict[str, int] = {}
+        next_map_id = 1000
+
+        for item in world.maps:
+            map_id = item.map_id if item.map_id is not None else next_map_id
+            if item.map_id is None:
+                next_map_id += 1
+            map_name_to_id[item.name] = int(map_id)
+            maps.append(
+                {
+                    "id": int(map_id),
+                    "name": item.name,
+                    "description": item.description or "",
+                }
+            )
+
+        if world.default_map_name and world.default_map_name not in map_name_to_id:
+            default_id = int(world.default_map_id or next_map_id)
+            map_name_to_id[world.default_map_name] = default_id
+            maps.append(
+                {
+                    "id": default_id,
+                    "name": world.default_map_name,
+                    "description": "default world map",
+                }
+            )
+            next_map_id = max(next_map_id, default_id + 1)
+
+        waypoints: Dict[int, list[dict[str, Any]]] = {}
+        next_waypoint_id = 10000
+
+        for loc in world.locations:
+            map_id = loc.map_id
+            if map_id is None and loc.map_name:
+                map_id = map_name_to_id.get(loc.map_name)
+            if map_id is None:
+                if world.default_map_id is not None:
+                    map_id = int(world.default_map_id)
+                elif world.default_map_name:
+                    map_id = map_name_to_id.get(world.default_map_name)
+            if map_id is None:
+                continue
+
+            waypoint_id = loc.waypoint_id if loc.waypoint_id is not None else next_waypoint_id
+            if loc.waypoint_id is None:
+                next_waypoint_id += 1
+
+            name = loc.waypoint_name or loc.name
+            metadata = loc.metadata or {}
+            entry = {
+                "id": int(waypoint_id),
+                "name": name,
+                "display_name": loc.name,
+                "x": float(metadata.get("x", 0.0) or 0.0),
+                "y": float(metadata.get("y", 0.0) or 0.0),
+                "z": float(metadata.get("z", 0.0) or 0.0),
+                "yaw": float(metadata.get("yaw", 0.0) or 0.0),
+                "aliases": list(dict.fromkeys([*(loc.aliases or []), loc.name, loc.waypoint_name])),
+                "location_type": loc.location_type,
+            }
+            waypoints.setdefault(int(map_id), []).append(entry)
+
+        if not maps or not waypoints:
+            return self._default_mock_payload()
+
+        return maps, waypoints
+
+    def _rebuild_alias_index(self) -> None:
+        self._mock_waypoint_aliases = {}
+        for map_id, items in self._mock_waypoints.items():
+            alias_map: Dict[str, Dict[str, Any]] = {}
+            for wp in items:
+                names = [wp.get("name"), wp.get("display_name"), *(wp.get("aliases") or [])]
+                for name in names:
+                    normalized = str(name or "").strip()
+                    if normalized:
+                        alias_map[normalized] = wp
+            self._mock_waypoint_aliases[int(map_id)] = alias_map
+
+    def _refresh_mock_world(self, force: bool = False) -> None:
+        world_path = self._resolve_world_path()
+        world_mtime = None
+        if world_path and world_path.exists():
+            world_mtime = world_path.stat().st_mtime
+
+        if (
+            not force
+            and world_path == self._world_path
+            and world_mtime is not None
+            and world_mtime == self._world_path_mtime
+            and self._mock_maps
+            and self._mock_waypoints
+        ):
+            return
+
+        if world_path and world_path.exists():
+            maps, waypoints = self._build_mock_data_from_world(world_path)
+            self._world_path = world_path
+            self._world_path_mtime = world_mtime
+        else:
+            maps, waypoints = self._default_mock_payload()
+            self._world_path = world_path
+            self._world_path_mtime = world_mtime
+
+        self._mock_maps = maps
+        self._mock_waypoints = waypoints
+        self._rebuild_alias_index()
+
+        available_map_ids = [int(item["id"]) for item in self._mock_maps if item.get("id") is not None]
+        if self._current_map_id not in available_map_ids:
+            if available_map_ids:
+                self._current_map_id = available_map_ids[0]
+
     def _find_waypoint(self, target: str) -> Optional[Dict[str, Any]]:
         if not target:
             return None
+        self._refresh_mock_world()
         map_id = self._current_map_id or 51
+        normalized_target = str(target).strip()
+        alias_map = self._mock_waypoint_aliases.get(int(map_id), {})
+        if normalized_target in alias_map:
+            return alias_map[normalized_target]
+
+        synonym_map = {
+            "厕所": ["卫生间"],
+            "卫生间": ["厕所"],
+            "充电处": ["回充点", "充电点"],
+            "充电点": ["回充点", "充电处"],
+        }
+        for synonym in synonym_map.get(normalized_target, []):
+            if synonym in alias_map:
+                return alias_map[synonym]
+
         waypoints = self._mock_waypoints.get(map_id, [])
         for wp in waypoints:
-            if wp["name"] == target:
+            name = str(wp.get("name") or "").strip()
+            display_name = str(wp.get("display_name") or "").strip()
+            if normalized_target in name or name in normalized_target:
                 return wp
-        for wp in waypoints:
-            if target in wp["name"] or wp["name"] in target:
+            if display_name and (normalized_target in display_name or display_name in normalized_target):
                 return wp
         return None
 
     def _find_dock_waypoint(self, map_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        self._refresh_mock_world()
         target_map_id = map_id or self._current_map_id or 51
         for wp in self._mock_waypoints.get(target_map_id, []):
-            if "回充" in wp["name"] or "充电" in wp["name"] or "dock" in wp["name"].lower():
+            names = [wp.get("name"), wp.get("display_name"), *(wp.get("aliases") or [])]
+            joined = " ".join(str(item or "") for item in names).lower()
+            if "回充" in joined or "充电" in joined or "dock" in joined:
                 return wp
         return None
 
@@ -135,10 +278,12 @@ class MockFishBotAdapter(RobotAdapter):
     
     # ========== 地图操作 ==========
     def list_maps(self):
+        self._refresh_mock_world()
         print("[MOCK] list_maps()")
         return [MapInfo(**m) for m in self._mock_maps]
     
     def start_navigation(self, map_id: int = None) -> bool:
+        self._refresh_mock_world()
         if map_id is None:
             map_id = self._current_map_id or (self._mock_maps[0]["id"] if self._mock_maps else 1)
         print(f"[MOCK] start_navigation(map_id={map_id})")
@@ -155,6 +300,7 @@ class MockFishBotAdapter(RobotAdapter):
         return True
     
     def get_navigation_status(self) -> dict:
+        self._refresh_mock_world()
         return {
             "nav_running": self._nav_running,
             "current_map_id": self._current_map_id
@@ -162,10 +308,22 @@ class MockFishBotAdapter(RobotAdapter):
     
     # ========== 路点操作 ==========
     def list_waypoints(self, map_id: int):
+        self._refresh_mock_world()
         print(f"[MOCK] list_waypoints(map_id={map_id})")
         waypoints = self._mock_waypoints.get(map_id, [])
-        return [WaypointInfo(id=wp["id"], name=wp["name"], map_id=map_id, 
-                           x=wp["x"], y=wp["y"]) for wp in waypoints]
+        return [
+            WaypointInfo(
+                id=wp["id"],
+                name=wp["name"],
+                map_id=map_id,
+                x=wp["x"],
+                y=wp["y"],
+                z=wp.get("z", 0.0),
+                yaw=wp.get("yaw", 0.0),
+                type=wp.get("location_type", "normal"),
+            )
+            for wp in waypoints
+        ]
     
     def goto_waypoint(self, waypoint_id: int) -> bool:
         print(f"[MOCK] goto_waypoint(waypoint_id={waypoint_id})")
@@ -183,6 +341,7 @@ class MockFishBotAdapter(RobotAdapter):
         return self.motion_stand()
 
     def navigate_to(self, target: str) -> bool:
+        self._refresh_mock_world()
         if not target:
             return False
 
@@ -223,6 +382,7 @@ class MockFishBotAdapter(RobotAdapter):
         return True
 
     def execute_docking_async(self) -> bool:
+        self._refresh_mock_world()
         dock = self._find_dock_waypoint(self._current_map_id)
         print(f"[MOCK] execute_docking_async(map_id={self._current_map_id})")
         with self._state_lock:
@@ -308,16 +468,27 @@ class MockFishBotAdapter(RobotAdapter):
     
     # ========== 其他必需方法（快速实现）==========
     def get_map(self, map_id: int):
+        self._refresh_mock_world()
         for m in self._mock_maps:
             if m["id"] == map_id:
                 return MapInfo(**m)
         return None
     
     def get_waypoint(self, waypoint_id: int):
+        self._refresh_mock_world()
         for map_waypoints in self._mock_waypoints.values():
             for wp in map_waypoints:
                 if wp["id"] == waypoint_id:
-                    return WaypointInfo(id=wp["id"], name=wp["name"], map_id=1, x=wp["x"], y=wp["y"])
+                    return WaypointInfo(
+                        id=wp["id"],
+                        name=wp["name"],
+                        map_id=self._current_map_id or 1,
+                        x=wp["x"],
+                        y=wp["y"],
+                        z=wp.get("z", 0.0),
+                        yaw=wp.get("yaw", 0.0),
+                        type=wp.get("location_type", "normal"),
+                    )
         return None
     
     def create_task(self, name: str, description: str = "", program: dict = None):

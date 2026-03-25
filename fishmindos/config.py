@@ -13,32 +13,33 @@ from typing import Any, Dict, Optional
 class LLMConfig:
     """LLM配置 - 支持多提供商"""
     provider: str = "zhipu"  # zhipu, openai, claude, qwen, gemini, ollama
-    api_key: str = "dfd4ea25c8c2431eade2a007d9fe2045.vws62CAdIZaVv08Y"
+    api_key: str = ""
     base_url: Optional[str] = None  # 自定义API地址（如需要）
     model: str = "glm-4.5-Air"
     temperature: float = 0.7
     max_tokens: int = 2000
     timeout: int = 30
+    max_iterations: int = 4
 
 
 @dataclass
 class NavServerConfig:
     """导航服务器配置"""
-    host: str = "192.168.123.100"
+    host: str = "127.0.0.1"
     port: int = 8888
 
 
 @dataclass
 class NavAppConfig:
     """导航应用配置"""
-    host: str = "192.168.123.100"
+    host: str = "127.0.0.1"
     port: int = 8888
 
 
 @dataclass
 class RosbridgeConfig:
     """Rosbridge WebSocket配置"""
-    host: str = "192.168.123.100"
+    host: str = "127.0.0.1"
     port: int = 8888
     path: str = "/api/rt"
     use_ssl: bool = False
@@ -138,9 +139,7 @@ class FishMindConfig:
         path = Path(config_path)
         
         if not path.exists():
-            config = cls()
-            config.save_to_file(config_path)
-            return config
+            return cls()
         
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -161,6 +160,8 @@ class FishMindConfig:
             config.llm.model = os.getenv("FISHMIND_LLM_MODEL")
         if os.getenv("FISHMIND_LLM_BASE_URL"):
             config.llm.base_url = os.getenv("FISHMIND_LLM_BASE_URL")
+        if os.getenv("FISHMIND_LLM_MAX_ITERATIONS"):
+            config.llm.max_iterations = int(os.getenv("FISHMIND_LLM_MAX_ITERATIONS"))
         
         # 服务器配置
         if os.getenv("FISHMIND_NAV_SERVER_HOST"):
@@ -245,6 +246,8 @@ class FishMindConfig:
             config.llm.max_tokens = int(os.getenv("FISHMIND_LLM_MAX_TOKENS"))
         if os.getenv("FISHMIND_LLM_TIMEOUT"):
             config.llm.timeout = int(os.getenv("FISHMIND_LLM_TIMEOUT"))
+        if os.getenv("FISHMIND_LLM_MAX_ITERATIONS"):
+            config.llm.max_iterations = int(os.getenv("FISHMIND_LLM_MAX_ITERATIONS"))
         
         # 导航服务器配置
         if os.getenv("FISHMIND_NAV_SERVER_HOST"):

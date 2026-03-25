@@ -105,6 +105,7 @@ class MissionManager:
                 except Exception:
                     pass
                 self._log("[小脑] 任务全部完成")
+                self.event_bus.publish("mission_completed", {"status": "completed"})
                 return
             task = self.current_mission_queue.pop(0)
 
@@ -249,6 +250,7 @@ class MissionManager:
         self._stop_wait_confirm_reminder()
         self.last_error = f"action failed: {data}"
         self._log(f"[小脑] 动作失败，任务终止: {data}")
+        self.event_bus.publish("mission_failed", {"error": self.last_error, "detail": data})
 
     def _start_wait_confirm_reminder(self, reminder_text: str) -> None:
         if not self._wait_reminder_enabled:

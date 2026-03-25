@@ -6,19 +6,21 @@
     "return_behavior": {
       "key": "return_behavior",
       "value": "charge",
-      "confidence": 1,
+      "confidence": 3,
       "source": "learned",
-      "notes": "用户说返回/回来且未明确目标时，优先理解为回充。"
+      "notes": "用户说返回/回来且未明确目标时，优先理解为回充。；用户说“返回/回来/回去”且未明确目标时，优先理解为回充。"
     }
   },
   "rules": {
     "implicit_return_target": {
       "name": "implicit_return_target",
       "rule": "当用户只说返回/回来而没有明确目标时，默认回到回充点。",
-      "confidence": 1,
+      "confidence": 3,
       "source": "learned",
       "examples": [
-        "去卫生间，闪绿灯，然后返回并播报"
+        "去卫生间，闪绿灯，然后返回并播报",
+        "帮我去大厅拿个快递，送到卫生间，然后回来充电",
+        "帮我去大厅拿个快递，送到路点3，然后返回充电"
       ]
     }
   },
@@ -69,6 +71,70 @@
       "learned_at": "2026-03-25T10:51:13",
       "tags": [
         "task"
+      ]
+    },
+    {
+      "summary": "记录：最近执行过与 大厅 相关的任务。",
+      "user_input": "从大厅取一包纸送到卫生间",
+      "learned_at": "2026-03-25T11:24:19",
+      "tags": [
+        "task"
+      ]
+    },
+    {
+      "summary": "记录：最近执行过与 卫生间 相关的任务。",
+      "user_input": "去卫生间拿快递，送到充电处",
+      "learned_at": "2026-03-25T11:34:25",
+      "tags": [
+        "task"
+      ]
+    },
+    {
+      "summary": "记录：最近执行过与 路点3 相关的任务。",
+      "user_input": "导航去路点3",
+      "learned_at": "2026-03-25T11:40:12",
+      "tags": [
+        "task"
+      ]
+    },
+    {
+      "summary": "记录：最近执行过与 大厅 相关的任务。",
+      "user_input": "去大厅拿快递，送到路点3，然后回充",
+      "learned_at": "2026-03-25T13:15:50",
+      "tags": [
+        "task"
+      ]
+    },
+    {
+      "summary": "记录：最近执行过与 大厅 相关的任务。",
+      "user_input": "去大厅拿快递送到卫生间然后回充",
+      "learned_at": "2026-03-25T13:23:20",
+      "tags": [
+        "task"
+      ]
+    },
+    {
+      "summary": "学到：用户说“返回/回来”通常表示回充。",
+      "user_input": "帮我去大厅拿个快递，送到卫生间，然后回来充电",
+      "learned_at": "2026-03-25T13:42:23",
+      "tags": [
+        "return"
+      ]
+    },
+    {
+      "summary": "记录：最近执行过与 大厅 相关的任务。",
+      "user_input": "制定一套巡检路线，先去大厅，再去卫生间，最后去路点3，再回充点充电",
+      "learned_at": "2026-03-25T13:54:38",
+      "tags": [
+        "task"
+      ]
+    },
+    {
+      "summary": "学到：用户说“返回/回来”通常表示回充。",
+      "user_input": "帮我去大厅拿个快递，送到路点3，然后返回充电",
+      "learned_at": "2026-03-25T15:19:08",
+      "tags": [
+        "return"
       ]
     }
   ]

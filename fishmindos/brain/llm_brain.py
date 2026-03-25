@@ -1,4 +1,4 @@
-"""
+﻿"""
 FishMindOS - 基于LLM的智能大脑
 使用LLM进行意图识别、任务规划和技能调用
 """
@@ -659,39 +659,25 @@ class LLMBrain:
         return {"status": "proceed", "effective_input": normalized}
     
     def think(self, user_input: str) -> Generator[BrainResponse, None, None]:
-        """
-        使用LLM进行思考
-        支持多轮对话，直到任务完成
-        """
+        """Use the main LLM loop directly and keep the generator response contract intact."""
         self._cancel_event.clear()
-        
-        # 如果没有LLM，使用规则引擎
+
         if self.llm is None:
             yield from self._rule_based_think(user_input)
             return
-        
-        try:
-            # 保存当前输入
-            self.session_context["last_input"] = user_input
 
-            # 让 LLM 判断是否需要追问，避免硬编码模板化判断。
-            clarify_result = self._resolve_input_with_llm_clarification(user_input)
-            if clarify_result.get("status") == "ask":
-                yield BrainResponse(type="text", content=str(clarify_result.get("question", "请补充任务信息。")))
-                return
-            user_input = str(clarify_result.get("effective_input", user_input))
-            
-            # 1. 构建消息（包含结构化状态，而非自然语言摘要）
+        try:
+            self.session_context["last_input"] = user_input
+            self._set_current_intent_type(None)
+
             messages = [
                 LLMMessage(role="system", content=self._get_system_prompt()),
             ]
-            
-            # 添加结构化状态记忆（不是对话历史）
+
             context_info = self._get_context_info()
             if context_info:
                 messages.append(LLMMessage(role="system", content=f"[当前状态]\n{context_info}"))
-            
-            # 检测复合指令并添加提示
+
             compound_hint = self._detect_compound_instruction(user_input)
             if compound_hint:
                 messages.append(LLMMessage(role="system", content=compound_hint))
@@ -699,19 +685,16 @@ class LLMBrain:
             planning_hint = self._get_planning_mode_hint(user_input)
             if planning_hint:
                 messages.append(LLMMessage(role="system", content=planning_hint))
-            
-            # 添加当前输入
+
             messages.append(LLMMessage(role="user", content=user_input))
-            
-            # 打印调试信息
+
             if context_info:
-                print(f"[DEBUG] 使用状态上下文")
+                print("[DEBUG] 使用状态上下文")
             if compound_hint:
-                print(f"[DEBUG] 检测到复合指令，已添加提示")
+                print("[DEBUG] 检测到复合指令，已添加提示")
             if planning_hint:
-                print(f"[DEBUG] 使用规划优先模式")
-            
-            # 2. 获取可用技能作为工具
+                print("[DEBUG] 使用规划优先模式")
+
             available_tools = self._get_available_tools(user_input)
             allowed_tool_names = {
                 tool.get("function", {}).get("name")
@@ -720,24 +703,11 @@ class LLMBrain:
             }
             tools = self.llm.get_tool_definitions(available_tools)
             tool_choice = None
-            intent_type = self._current_intent_type()
-            if intent_type == "mission" and "submit_mission" in allowed_tool_names:
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "submit_mission"},
-                }
-            elif intent_type == "status" and "system_status" in allowed_tool_names:
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "system_status"},
-                }
-            
-            # 3. 多轮对话，直到LLM不再调用工具
-            max_iterations = 10
+
+            max_iterations = max(1, int(getattr(get_config().llm, "max_iterations", 4) or 4))
             iteration = 0
             final_text = ""
-            
-            # 收集所有计划步骤
+
             all_steps = []
             executed_steps = []
             plan_shown = False
@@ -749,21 +719,19 @@ class LLMBrain:
             terminal_error_emitted = False
             submit_mission_pending = False
             status_query_completed = False
-            
+            direct_text_emitted = False
+
             while iteration < max_iterations:
                 iteration += 1
-                
-                # 调用LLM
+
                 llm_response = self.llm.chat(
                     messages=messages,
                     tools=tools,
-                    temperature=0.1,  # 降低温度，更确定性
+                    temperature=0.1,
                     tool_choice=tool_choice,
                 )
-                
-                # 处理工具调用
+
                 if llm_response.tool_calls:
-                    # 收集这一轮的所有工具调用
                     round_steps = []
                     for tool_call in llm_response.tool_calls:
                         try:
@@ -772,32 +740,30 @@ class LLMBrain:
                                 if fixed_call["name"] not in allowed_tool_names:
                                     print(f"[WARN] 规划模式下忽略工具: {fixed_call['name']}")
                                     continue
-                                step = {
-                                    'skill': fixed_call['name'],
-                                    'params': fixed_call['arguments'],
-                                    'tool_call': tool_call
-                                }
-                                round_steps.append(step)
+                                round_steps.append({
+                                    "skill": fixed_call["name"],
+                                    "params": fixed_call["arguments"],
+                                    "tool_call": tool_call,
+                                })
                         except Exception as e:
                             print(f"[WARN] 解析工具调用失败: {e}")
                             continue
-                    
-                    # 查询 / 任务意图由 LLM 预判决定，不再使用关键词兜底重写工具链。
+
+                    round_tool_names = {step.get("skill") for step in round_steps if step.get("skill")}
+                    if "submit_mission" in round_tool_names:
+                        self._set_current_intent_type("mission")
+                    elif "system_status" in round_tool_names:
+                        self._set_current_intent_type("status")
+
                     if self._is_simple_status_query(user_input):
-                        status_steps = [
-                            step for step in round_steps
-                            if step.get("skill") == "system_status"
-                        ]
+                        status_steps = [step for step in round_steps if step.get("skill") == "system_status"]
                         if round_steps and not status_steps:
                             print(f"[WARN] 状态查询意图下收到非状态工具: {[s.get('skill') for s in round_steps]}")
                         round_steps = status_steps[:1]
                         print(f"[DEBUG] 状态查询意图: '{user_input}' - 保留步骤: {[s['skill'] for s in round_steps]}")
-                    
-                    # 强制按正确顺序排序（导航任务）
+
                     round_steps = self._sort_steps(round_steps)
                     round_steps = self._augment_steps_from_intent(user_input, all_steps, round_steps)
-                    
-                    # 收集所有步骤（包括多轮返回的）
                     all_steps.extend(round_steps)
 
                     if not round_steps:
@@ -806,189 +772,144 @@ class LLMBrain:
                             terminal_error_emitted = True
                             yield BrainResponse(
                                 type="error",
-                                content="LLM未生成可执行计划（工具调用为空或不可解析）。请重试，或简化指令后再试。"
+                                content="LLM未生成可执行计划。请重试，或简化指令后再试。",
                             )
                             break
                         if self.session_context.get("planning_only"):
                             messages.append(LLMMessage(
                                 role="system",
-                                content="规划模式下禁止调用 nav_list_maps/nav_list_waypoints，请直接返回动作步骤。"
+                                content="规划模式下禁止调用 nav_list_maps/nav_list_waypoints，请直接返回动作步骤。",
                             ))
                         continue
                     no_step_rounds = 0
-                    
-                    # 如果是第一轮且有步骤，显示完整计划
+
                     if iteration == 1 and round_steps and not plan_shown:
-                        # 验证规划质量
-                        has_submit_mission = any(
-                            step.get("skill") == "submit_mission" for step in all_steps
-                        )
+                        has_submit_mission = any(step.get("skill") == "submit_mission" for step in all_steps)
                         if has_submit_mission:
-                            # 统一任务入口模式下，旧的逐技能校验规则不再适用
                             is_valid, issues = True, []
                         else:
                             is_valid, issues = self.plan_validator.validate_plan(user_input, all_steps)
-                        
-                        yield BrainResponse(
-                            type="plan",
-                            content="",
-                            metadata={"steps": all_steps.copy()}
-                        )
-                        
-                        # 如果有问题，显示验证反馈并提示改进
+
+                        yield BrainResponse(type="plan", content="", metadata={"steps": all_steps.copy()})
+
                         if not is_valid:
                             print(f"[PLAN VALIDATOR] 检测到规划问题: {issues}")
                             improvement_hint = self.plan_validator.get_improvement_hint(issues)
-                            yield BrainResponse(
-                                type="debug",
-                                content=improvement_hint
-                            )
-                            # 将改进提示添加到消息中，让 LLM 调整规划
-                            messages.append(LLMMessage(
-                                role="user",
-                                content=improvement_hint
-                            ))
-                            # 继续循环，让 LLM 生成改进后的规划
+                            yield BrainResponse(type="debug", content=improvement_hint)
+                            messages.append(LLMMessage(role="user", content=improvement_hint))
                             continue
-                        
+
                         plan_shown = True
                         shown_plan_length = len(all_steps)
-                        # 保存计划到上下文
                         self.session_context["last_plan"] = all_steps.copy()
                     elif self.session_context.get("planning_only") and round_steps and len(all_steps) > shown_plan_length:
-                        # 验证规划质量
                         is_valid, issues = self.plan_validator.validate_plan(user_input, all_steps)
-                        
-                        yield BrainResponse(
-                            type="plan",
-                            content="",
-                            metadata={"steps": all_steps.copy()}
-                        )
-                        
-                        # 如果有问题，显示验证反馈
+                        yield BrainResponse(type="plan", content="", metadata={"steps": all_steps.copy()})
                         if not is_valid:
                             print(f"[PLAN VALIDATOR] 检测到规划问题: {issues}")
                             improvement_hint = self.plan_validator.get_improvement_hint(issues)
-                            yield BrainResponse(
-                                type="debug",
-                                content=improvement_hint
-                            )
-                            messages.append(LLMMessage(
-                                role="user",
-                                content=improvement_hint
-                            ))
+                            yield BrainResponse(type="debug", content=improvement_hint)
+                            messages.append(LLMMessage(role="user", content=improvement_hint))
                             continue
-                        
                         shown_plan_length = len(all_steps)
                         self.session_context["last_plan"] = all_steps.copy()
-                    
-                    # 执行这一轮的每个工具调用
-                    for i, step in enumerate(round_steps):
+
+                    for step in round_steps:
                         if self._cancel_event.is_set():
                             yield BrainResponse(type="error", content="任务已取消")
                             return
-                        
-                        function_name = step['skill']
-                        arguments = self._normalize_step_arguments(function_name, step['params'])
-                        
-                        # 跳过已执行的步骤（防重复）
+
+                        function_name = step["skill"]
+                        arguments = self._normalize_step_arguments(function_name, step["params"])
                         step_key = f"{function_name}:{json.dumps(arguments, sort_keys=True)}"
                         if step_key in executed_steps:
                             continue
-                        
-                        # 显示技能调用
+
                         yield BrainResponse(
                             type="action",
                             content=f"执行技能: {function_name}",
                             metadata={
                                 "skill": function_name,
                                 "params": arguments,
-                                "step_num": len(executed_steps) + 1
-                            }
+                                "step_num": len(executed_steps) + 1,
+                            },
                         )
-                        
-                        # 执行技能
+
                         skill = self.registry.get(function_name)
-                        if skill:
-                            try:
-                                result = skill.run(arguments, self.session_context)
-                                # 检查结果是否为 None
-                                if result is None:
-                                    error_msg = f"技能 {function_name} 返回 None"
-                                    yield BrainResponse(type="error", content=error_msg)
-                                    consecutive_failures += 1
-                                    continue
-                                result_content = result.get("detail", "")
-                                success = result.get("ok", False)
-                                result_data = result.get("data")
-                                if function_name == "submit_mission" and success:
-                                    if isinstance(result_data, dict):
-                                        submit_mission_pending = bool(result_data.get("pending", True))
-                                    else:
-                                        submit_mission_pending = True
-                                
-                                yield BrainResponse(
-                                    type="result",
-                                    content=result_content,
-                                    metadata={
-                                        "success": success,
-                                        "skill": function_name,
-                                        "data": result_data
-                                    }
-                                )
-                                
-                                executed_steps.append(step_key)
-                                executed_any_step = True
-                                if function_name == "system_status" and self._is_simple_status_query(user_input):
-                                    status_query_completed = True
-                                    if success and result_content:
-                                        final_text = result_content
-                                
-                                # 更新连续失败计数
-                                if success:
-                                    consecutive_failures = 0
-                                else:
-                                    had_failures = True
-                                    consecutive_failures += 1
-                                    if consecutive_failures >= 2:
-                                        yield BrainResponse(
-                                            type="error",
-                                            content="连续执行失败，任务中止。请检查参数或手动处理。"
-                                        )
-                                        break
-                                
-                                # 更新上下文
-                                self._update_context(function_name, result)
-                                
-                                # 添加到消息历史
-                                messages.append(LLMMessage(
-                                    role="assistant",
-                                    content=f"调用了 {function_name}",
-                                    tool_calls=[step['tool_call']]
-                                ))
-                                messages.append(LLMMessage(
-                                    role="tool",
-                                    content=json.dumps({"result": result_content, "success": success}),
-                                    tool_call_id=step['tool_call'].get('id', '')
-                                ))
-                                
-                            except Exception as e:
-                                error_msg = f"执行异常: {str(e)}"
+                        if not skill:
+                            yield BrainResponse(type="error", content=f"技能 {function_name} 不存在")
+                            continue
+
+                        try:
+                            result = skill.run(arguments, self.session_context)
+                            if result is None:
+                                error_msg = f"技能 {function_name} 返回 None"
                                 yield BrainResponse(type="error", content=error_msg)
-                                messages.append(LLMMessage(
-                                    role="tool",
-                                    content=json.dumps({"error": error_msg}),
-                                    tool_call_id=step['tool_call'].get('id', '')
-                                ))
+                                consecutive_failures += 1
+                                continue
+
+                            result_content = result.get("detail", "")
+                            success = result.get("ok", False)
+                            result_data = result.get("data")
+
+                            if function_name == "submit_mission" and success:
+                                if isinstance(result_data, dict):
+                                    submit_mission_pending = bool(result_data.get("pending", True))
+                                else:
+                                    submit_mission_pending = True
+
+                            yield BrainResponse(
+                                type="result",
+                                content=result_content,
+                                metadata={
+                                    "success": success,
+                                    "skill": function_name,
+                                    "data": result_data,
+                                },
+                            )
+
+                            executed_steps.append(step_key)
+                            executed_any_step = True
+
+                            if function_name == "system_status" and self._is_simple_status_query(user_input):
+                                status_query_completed = True
+                                if success and result_content:
+                                    final_text = result_content
+
+                            if success:
+                                consecutive_failures = 0
+                            else:
                                 had_failures = True
                                 consecutive_failures += 1
-                        else:
-                            yield BrainResponse(
-                                type="error",
-                                content=f"技能 {function_name} 不存在"
-                            )
-                    
-                    # 如果连续失败过多，跳出循环
+                                if consecutive_failures >= 2:
+                                    yield BrainResponse(
+                                        type="error",
+                                        content="连续执行失败，任务中止。请检查参数或手动处理。",
+                                    )
+                                    break
+
+                            self._update_context(function_name, result)
+                            messages.append(LLMMessage(
+                                role="assistant",
+                                content=f"调用了 {function_name}",
+                                tool_calls=[step["tool_call"]],
+                            ))
+                            messages.append(LLMMessage(
+                                role="tool",
+                                content=json.dumps({"result": result_content, "success": success}),
+                                tool_call_id=step["tool_call"].get("id", ""),
+                            ))
+                        except Exception as e:
+                            error_msg = f"执行异常: {str(e)}"
+                            yield BrainResponse(type="error", content=error_msg)
+                            messages.append(LLMMessage(
+                                role="tool",
+                                content=json.dumps({"error": error_msg}),
+                                tool_call_id=step["tool_call"].get("id", ""),
+                            ))
+                            had_failures = True
+                            consecutive_failures += 1
+
                     if consecutive_failures >= 2:
                         break
                     if status_query_completed:
@@ -998,66 +919,44 @@ class LLMBrain:
                             break
                         messages.append(LLMMessage(
                             role="system",
-                            content=self._get_planning_followup_hint(user_input, all_steps)
+                            content=self._get_planning_followup_hint(user_input, all_steps),
                         ))
                         continue
-                    elif round_steps and self._is_action_request(user_input):
+                    if round_steps and self._is_action_request(user_input):
                         if self._planning_requirements_met(user_input, all_steps):
                             break
                         messages.append(LLMMessage(
                             role="system",
-                            content=self._get_planning_followup_hint(user_input, all_steps)
+                            content=self._get_planning_followup_hint(user_input, all_steps),
                         ))
                         continue
-                        
                 else:
-                    # 没有工具调用
-                    if (
-                        self._is_action_request(user_input)
-                        and executed_any_step
-                        and not self._planning_requirements_met(user_input, all_steps)
-                    ):
-                        messages.append(LLMMessage(
-                            role="system",
-                            content=self._get_planning_followup_hint(user_input, all_steps)
-                        ))
-                        continue
-
-                    if iteration == 1:
-                        # 第一轮就没有工具调用，说明LLM没理解要执行动作
-                        if self._is_action_request(user_input):
-                            # 看起来是动作指令但没有调用工具，提示错误
-                            error_msg = "我理解您的指令，但没有执行具体操作。请重试或检查系统状态。"
-                            yield BrainResponse(type="error", content=error_msg)
-                            # 添加错误到消息，让LLM知道需要调用工具
-                            messages.append(LLMMessage(
-                                role="tool",
-                                content=json.dumps({"error": "用户要求执行动作，请调用相应技能"})
-                            ))
-                            continue  # 继续循环，让LLM重新生成
-                    
-                    # 纯查询或已经重试过，返回文本回复
-                    if llm_response.content:
-                        final_text = llm_response.content
+                    content = str(llm_response.content or "").strip()
+                    if content:
+                        self._set_current_intent_type("chat")
+                        final_text = content
+                        direct_text_emitted = True
+                        yield BrainResponse(type="text", content=content)
                     break
-            
+
             planning_complete = True
             if (self.session_context.get("planning_only") or self._is_action_request(user_input)) and executed_any_step:
                 planning_complete = self._planning_requirements_met(user_input, all_steps)
             has_submit_mission = any(step.get("skill") == "submit_mission" for step in all_steps)
 
-            # 输出最终文本回复
-            if self.session_context.get("planning_only") and executed_any_step and planning_complete:
+            if direct_text_emitted:
+                pass
+            elif self.session_context.get("planning_only") and executed_any_step and planning_complete:
                 yield BrainResponse(type="text", content="本轮操作已执行完成。")
             elif self.session_context.get("planning_only") and not planning_complete:
                 yield BrainResponse(
                     type="error",
-                    content="规划未完整覆盖用户需求，请继续优化提示词或仿真场景。"
+                    content="规划未完整覆盖用户需求，请继续优化提示词或仿真场景。",
                 )
             elif executed_any_step and not planning_complete:
                 yield BrainResponse(
                     type="error",
-                    content="本轮计划未完整覆盖用户需求，请补充 world 描述或重试更明确的指令。"
+                    content="本轮计划未完整覆盖用户需求，请补充 world 描述或重试更明确的指令。",
                 )
             elif has_submit_mission and executed_any_step and not had_failures:
                 if submit_mission_pending:
@@ -1071,33 +970,31 @@ class LLMBrain:
             elif executed_any_step and had_failures and not terminal_error_emitted:
                 yield BrainResponse(
                     type="error",
-                    content="本轮任务执行未成功，请查看上面的错误信息。"
+                    content="本轮任务执行未成功，请查看上面的错误信息。",
                 )
             elif not terminal_error_emitted:
                 yield BrainResponse(
                     type="error",
-                    content="未生成任何可执行结果。请重试，或把指令改成更短的动作序列。"
+                    content="未生成任何可执行结果。请重试，或把指令改成更短的动作序列。",
                 )
-            
-            # 保存到历史（简化为一句话总结，不保留详细步骤）
+
             executed_skills = [s["skill"] for s in all_steps]
-            history_summary = f"执行了: {', '.join(executed_skills)}" if executed_skills else "无操作"
-            
+            history_summary = f"执行了 {', '.join(executed_skills)}" if executed_skills else "无操作"
+
             self.session_context["conversation_history"].append({
                 "input": user_input,
-                "summary": history_summary
+                "summary": history_summary,
             })
-            # 保持历史不过长（最多保留3轮，减少干扰）
             if len(self.session_context["conversation_history"]) > 3:
                 self.session_context["conversation_history"] = self.session_context["conversation_history"][-3:]
 
             self._learn_from_interaction(user_input, all_steps)
-            
+
         except Exception as e:
             yield BrainResponse(type="error", content=f"LLM处理失败: {str(e)}")
             import traceback
             traceback.print_exc()
-    
+
     def _sort_steps(self, steps: List[Dict]) -> List[Dict]:
         """
         排序步骤，保证正确的执行顺序：
@@ -2157,21 +2054,10 @@ class LLMBrain:
         return normalized
 
     def _get_system_prompt(self) -> str:
-        """Build the live system prompt from docs/prompt.md and runtime context."""
+        """Build the runtime prompt from docs and add low-latency planning rules."""
         config = get_config()
         identity = config.app.identity
-
         base_prompt = (self.prompt_manager.get_prompt() or "").strip()
-        if not base_prompt:
-            base_prompt = (
-                "你是运行在 FishMindOS 系统上的对话与任务编排角色。\n"
-                "你的对外名字由当前配置中的 identity 或项目 profile 文档定义。\n"
-                "FishMindOS 是系统名，不是你的对话名字。\n"
-                "当用户问你叫什么、你是谁时，使用当前身份字段回答，不要回答自己是 FishMindOS。\n"
-                "移动、亮灯、播报、回充、人机协同等待等物理任务统一通过 submit_mission 提交。\n"
-                "纯状态查询使用 system_status。\n"
-                "普通聊天、身份介绍、解释说明不要调用工具。"
-            )
         identity_doc = (self.prompt_manager.get_identity() or "").strip()
         agent_doc = (self.prompt_manager.get_agent() or "").strip()
         tools_doc = (self.prompt_manager.get_tools() or "").strip()
@@ -2192,7 +2078,15 @@ class LLMBrain:
         else:
             map_info = "未加载"
 
-        sections = [base_prompt]
+        runtime_rules = (
+            "# Runtime Rules\n"
+            "【追问规则】：如果用户指令缺少关键地点或信息，导致无法执行，请直接回复自然语言追问，绝对不要调用任何工具。\n"
+            "【一站式规划铁律】：只要信息充足，你必须将所有需要的物理动作（移动、亮灯、播报、等待）一次性全部打包进 submit_mission 的 tasks 数组中。禁止自己一步一步拆解工具调用。\n"
+            "【状态查询规则】：纯状态、电量、充电查询时，只允许调用 system_status，然后直接文字回复。\n"
+            "【闲聊规则】：身份介绍、解释说明、普通闲聊时，不要调用任何工具。"
+        )
+
+        sections = [section for section in (base_prompt, runtime_rules) if section]
         if identity_doc:
             sections.append(f"# Identity 文档\n{identity_doc}")
         if agent_doc:
@@ -2217,132 +2111,11 @@ class LLMBrain:
         return "\n\n---\n\n".join(section for section in sections if section)
 
     def _resolve_input_with_llm_clarification(self, user_input: str) -> Dict[str, Any]:
-        """
-        Let the LLM decide whether the turn is chat / status / mission and whether clarification is needed.
-        Returns:
-            {"status": "ask", "question": "...", "intent_type": "mission"} or
-            {"status": "proceed", "effective_input": "...", "intent_type": "..."}.
-        """
-        text = str(user_input or "").strip()
-        if not text:
-            self._set_current_intent_type("chat")
-            return {"status": "proceed", "effective_input": user_input, "intent_type": "chat"}
-
-        pending = self.session_context.get("pending_clarification")
-        world_info = self._get_world_prompt_info() or "无"
-        soul_info = self._get_soul_prompt_info() or "无"
-
-        if isinstance(pending, dict) and pending.get("base_input"):
-            base_input = str(pending.get("base_input", "")).strip()
-            prev_question = str(pending.get("question", "")).strip()
-            messages = [
-                LLMMessage(
-                    role="system",
-                    content=(
-                        "你是 FishMindOS 的输入仲裁器。你要判断“最新输入”是：\n"
-                        "1. 对上轮澄清问题的补充；\n"
-                        "2. 一条全新的请求；\n"
-                        "3. 普通聊天。\n"
-                        "只返回 JSON，不要输出其他文本。\n"
-                        "{\n"
-                        '  "decision": "merged" | "ask_more" | "new_command",\n'
-                        '  "intent_type": "mission" | "status" | "chat",\n'
-                        '  "merged_input": "...",\n'
-                        '  "updated_base_input": "...",\n'
-                        '  "question": "..."\n'
-                        "}\n"
-                        "规则：\n"
-                        "- 如果最新输入是身份、寒暄、解释类内容，输出 new_command，并给出 chat。\n"
-                        "- 如果补充后仍缺少关键执行信息，输出 ask_more，并只追问一个最关键的问题。\n"
-                        "- 已知 world 中能推断的地点不要重复追问。\n"
-                        "- 如果用户已经给出取货地点和送达地点，不要继续追问该地点内部的具体摆放位置；默认可通过到达后 speak + wait_confirm 完成人机交接。"
-                    ),
-                ),
-                LLMMessage(
-                    role="user",
-                    content=(
-                        f"原始任务: {base_input}\n"
-                        f"上轮追问: {prev_question}\n"
-                        f"最新输入: {text}\n"
-                        f"world信息: {world_info}\n"
-                        f"soul信息: {soul_info}"
-                    ),
-                ),
-            ]
-            decision_data = self._call_llm_json_once(messages) or {}
-            decision = str(decision_data.get("decision", "")).strip().lower()
-
-            if decision == "ask_more":
-                question = str(decision_data.get("question", "")).strip() or "请补充任务关键信息。"
-                updated_base = str(decision_data.get("updated_base_input", "")).strip() or base_input
-                self.session_context["pending_clarification"] = {
-                    "base_input": updated_base,
-                    "question": question,
-                }
-                self._set_current_intent_type("mission")
-                return {"status": "ask", "question": question, "intent_type": "mission"}
-
-            if decision == "merged":
-                merged_input = str(decision_data.get("merged_input", "")).strip() or base_input
-                self.session_context.pop("pending_clarification", None)
-                intent_type = self._set_current_intent_type(decision_data.get("intent_type") or "mission") or "mission"
-                return {"status": "proceed", "effective_input": merged_input, "intent_type": intent_type}
-
-            self.session_context.pop("pending_clarification", None)
-
-        messages = [
-            LLMMessage(
-                role="system",
-                content=(
-                    "你是 FishMindOS 的输入分类与澄清仲裁器。请判断当前输入属于哪一种：\n"
-                    "- mission: 需要执行物理动作或任务流\n"
-                    "- status: 只查询当前状态、位置、电量、充电、当前任务等\n"
-                    "- chat: 普通聊天、身份介绍、解释说明、开放式对话\n"
-                    "只返回 JSON，不要输出其他文本。\n"
-                    "{\n"
-                    '  "intent_type": "mission" | "status" | "chat",\n'
-                    '  "need_clarification": true | false,\n'
-                    '  "question": "...",\n'
-                    '  "normalized_input": "..."\n'
-                    "}\n"
-                    "规则：\n"
-                    "- 只有 mission 才允许 need_clarification=true。\n"
-                    "- 只有在缺少关键信息会导致任务无法可靠执行时才追问。\n"
-                    "- 能从 world 推断的信息不要重复追问。\n"
-                    "- 不要把“你叫什么、你是谁、介绍一下自己”误判成任务。\n"
-                    "- 如果用户已经明确说出取货地点和送达地点，不要再追问该地点内部更细的摆放位置。\n"
-                    "- 例如“到大厅拿包纸送到厕所，然后回来充电”可以直接执行，不需要追问纸在大厅的具体位置。"
-                ),
-            ),
-            LLMMessage(
-                role="user",
-                content=(
-                    f"用户输入: {text}\n"
-                    f"world信息: {world_info}\n"
-                    f"soul信息: {soul_info}"
-                ),
-            ),
-        ]
-        judge_data = self._call_llm_json_once(messages) or {}
-        intent_type = self._set_current_intent_type(judge_data.get("intent_type"))
-        need_raw = judge_data.get("need_clarification", False)
-        need_clarification = bool(need_raw)
-        if isinstance(need_raw, str):
-            need_clarification = need_raw.strip().lower() in {"1", "true", "yes", "y"}
-
-        if intent_type == "mission" and need_clarification:
-            question = str(judge_data.get("question", "")).strip() or "请补充任务关键信息。"
-            self.session_context["pending_clarification"] = {
-                "base_input": text,
-                "question": question,
-            }
-            return {"status": "ask", "question": question, "intent_type": "mission"}
-
-        normalized = str(judge_data.get("normalized_input", "")).strip() or text
+        """Disabled fast path placeholder: the main LLM loop now handles clarification directly."""
         return {
             "status": "proceed",
-            "effective_input": normalized,
-            "intent_type": intent_type or "",
+            "effective_input": str(user_input or ""),
+            "intent_type": self._current_intent_type() or "",
         }
 
     def _detect_compound_instruction(self, user_input: str) -> str:
@@ -2350,30 +2123,13 @@ class LLMBrain:
         return ""
 
     def _get_available_tools(self, user_input: str) -> List[Dict[str, Any]]:
-        """Expose tools according to the current LLM-classified intent."""
+        """Expose both top-level tools and let the main LLM choose between text reply and tool call."""
         allowed_names = {"submit_mission", "system_status"}
-        tools = [
+        return [
             tool
             for tool in self.registry.get_tools()
             if tool.get("function", {}).get("name") in allowed_names
         ]
-        mission_tool = next(
-            (tool for tool in tools if tool.get("function", {}).get("name") == "submit_mission"),
-            None,
-        )
-        status_tool = next(
-            (tool for tool in tools if tool.get("function", {}).get("name") == "system_status"),
-            None,
-        )
-
-        intent_type = self._current_intent_type()
-        if intent_type == "chat":
-            return []
-        if intent_type == "status":
-            return [status_tool] if status_tool else []
-        if intent_type == "mission":
-            return [mission_tool] if mission_tool else []
-        return [tool for tool in (mission_tool, status_tool) if tool]
 
     def _is_action_request(self, user_input: str) -> bool:
         return self._current_intent_type() == "mission"
@@ -2522,3 +2278,4 @@ class LLMBrain:
         """列出支持的LLM提供商"""
         from fishmindos.brain.llm_providers import LLMFactory
         return LLMFactory.list_providers()
+

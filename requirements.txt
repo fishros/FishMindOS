@@ -1,0 +1,9 @@
+# FishMindOS minimal Python dependencies
+# Install with:
+#   pip install -r requirements.txt
+
+# Runtime: rosbridge / websocket client
+websocket-client>=1.8.0
+
+# Optional but recommended for local callback testing tools
+Flask>=3.0,<4.0

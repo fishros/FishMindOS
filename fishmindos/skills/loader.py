@@ -107,13 +107,16 @@ class SkillDiscoverer:
                 manifest = json.load(f)
             
             for skill_def in manifest.get("skills", []):
+                file_path = manifest_path.parent / skill_def.get("file", "")
+                if not file_path.exists():
+                    continue
                 metadata = SkillMetadata(
                     name=skill_def.get("name", "unknown"),
                     description=skill_def.get("description", ""),
                     version=skill_def.get("version", "1.0.0"),
                     author=skill_def.get("author", "unknown"),
                     category=skill_def.get("category", "custom"),
-                    file_path=manifest_path.parent / skill_def.get("file", ""),
+                    file_path=file_path,
                     module_name=skill_def.get("module", ""),
                     class_name=skill_def.get("class", "Skill"),
                     dependencies=skill_def.get("dependencies", [])

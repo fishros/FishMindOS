@@ -77,64 +77,106 @@ def sanitize_output(text: str) -> str:
 
 
 class TerminalUI:
-    """Minimal terminal UI."""
+    """Terminal UI with a lightweight color theme."""
 
     ICONS = {
-        "dog": "[DOG]",
-        "user": "[YOU]",
+        "dog": "DOG",
+        "user": "YOU",
         "skill": ">>",
         "success": "OK",
         "error": "ERR",
         "info": "::",
-        "plan": "[PLAN]",
-        "step": "  -",
+        "plan": "PLAN",
         "number": ["1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."],
     }
+    STYLES = {
+        "title": "\033[1;36m",
+        "muted": "\033[90m",
+        "user": "\033[1;34m",
+        "dog": "\033[1;32m",
+        "plan": "\033[1;35m",
+        "info": "\033[36m",
+        "ok": "\033[32m",
+        "err": "\033[31m",
+        "accent": "\033[1;37m",
+    }
+    RESET = "\033[0m"
 
     def __init__(self, use_colors: bool = True):
-        self.use_colors = use_colors
+        self.use_colors = bool(use_colors and sys.stdout.isatty())
         self._last_was_skill = False
 
+    def _style(self, text: str, style: str) -> str:
+        if not self.use_colors:
+            return text
+        prefix = self.STYLES.get(style, "")
+        if not prefix:
+            return text
+        return f"{prefix}{text}{self.RESET}"
+
+    def _label(self, key: str, style: str) -> str:
+        return self._style(f"[{self.ICONS[key]}]", style)
+
+    def _rule(self, title: str = "") -> None:
+        line = "━" * 58
+        print(self._style(line, "muted"))
+        if title:
+            print(self._style(title, "title"))
+            print(self._style(line, "muted"))
+
     def print_header(self):
+        config = get_config()
+        identity = getattr(getattr(config, "app", None), "identity", "") or "助手"
+        profile = getattr(getattr(config, "app", None), "prompt_profile", "") or "default"
         print()
-        print("=" * 50)
-        print("  FishMindOS - 机器狗智能控制系统")
-        print("=" * 50)
+        self._rule("FishMindOS")
+        print(self._style("机器人智能控制系统", "accent"))
+        print(self._style(f"身份: {identity}  |  Prompt Profile: {profile}", "muted"))
+        self._rule()
         print()
 
     def print_help(self):
-        print("指令示例:")
-        print("  去会议室    - 导航到会议室")
-        print("  关灯        - 关闭灯光")
-        print("  电量        - 查看状态")
-        print("  world       - 设置默认 world / 选择默认地图")
-        print("  确认        - 人工确认，继续 wait_confirm 后续流程")
-        print("  停止        - 取消当前任务")
-        print("  退出        - 结束对话")
+        print(self._style("示例指令", "accent"))
+        print("  去会议室               导航到会议室")
+        print("  地图26层，去大厅        指定地图后导航")
+        print("  去楼下帮我拿个快递      复合任务")
+        print("  你还有多少电            查询当前状态")
+        print()
+        print(self._style("控制命令", "accent"))
+        print("  world   设置默认 world / 默认地图")
+        print("  确认     继续 wait_confirm 后续流程")
+        print("  停止     取消当前任务")
+        print("  退出     结束对话")
         print()
 
     def print_user_prompt(self):
         if self._last_was_skill:
             print()
-        print(f"{self.ICONS['user']} ", end="", flush=True)
+        print(f"{self._label('user', 'user')} ", end="", flush=True)
 
     def print_robot_response(self, text: str):
-        print(f"{self.ICONS['dog']} {text}")
+        print(f"{self._label('dog', 'dog')} {text}")
         self._last_was_skill = False
 
     def print_plan(self, steps: List[Dict[str, Any]]):
-        print(f"{self.ICONS['plan']} 执行规划:")
+        print(self._style(f"[{self.ICONS['plan']}] 执行规划", "plan"))
         for i, step in enumerate(steps, 1):
             skill_name = step.get("skill", "")
-            desc = self._get_skill_desc(skill_name)
+            desc = self._get_skill_desc(skill_name) or skill_name
             params = step.get("params", {})
-            param_str = self._format_plan_params(skill_name, params)
+            number = self.ICONS["number"][i - 1] if i <= len(self.ICONS["number"]) else f"{i}."
 
-            num = self.ICONS["number"][i - 1] if i <= len(self.ICONS["number"]) else f"{i}."
-            if desc:
-                print(f"{self.ICONS['step']} {num} {desc} {param_str}")
+            if skill_name == "submit_mission" and isinstance(params.get("tasks"), list):
+                print(f"  {number} {desc}")
+                for task_line in self._format_mission_task_lines(params["tasks"]):
+                    print(self._style(f"     · {task_line}", "muted"))
+                continue
+
+            detail = self._format_plan_params(skill_name, params)
+            if detail:
+                print(f"  {number} {desc}  {self._style(detail, 'muted')}")
             else:
-                print(f"{self.ICONS['step']} {num} {skill_name} {param_str}")
+                print(f"  {number} {desc}")
         print()
         self._last_was_skill = False
 
@@ -142,67 +184,62 @@ class TerminalUI:
         if not isinstance(params, dict) or not params:
             return ""
 
-        if skill_name == "submit_mission":
-            tasks = params.get("tasks")
-            if isinstance(tasks, list):
-                return self._format_mission_tasks(tasks)
-
         items = []
         for key, value in params.items():
+            if skill_name == "submit_mission" and key == "tasks":
+                continue
             text = str(value)
-            if len(text) > 80:
-                text = text[:77] + "..."
+            if len(text) > 40:
+                text = text[:37] + "..."
             items.append(f"{key}={text}")
         return ", ".join(items)
 
-    def _format_mission_tasks(self, tasks: List[Dict[str, Any]]) -> str:
-        if not tasks:
-            return "tasks=[]"
-
-        parts: List[str] = []
-        for task in tasks[:8]:
+    def _format_mission_task_lines(self, tasks: List[Dict[str, Any]]) -> List[str]:
+        lines: List[str] = []
+        for task in tasks[:10]:
             if not isinstance(task, dict):
-                parts.append(str(task))
+                lines.append(str(task))
                 continue
             action = str(task.get("action", "")).lower()
             if action == "goto":
-                parts.append(f"goto({task.get('target', '?')})")
+                lines.append(f"goto -> {task.get('target', '?')}")
             elif action == "dock":
-                parts.append("dock()")
+                lines.append("dock -> 回充")
             elif action == "light":
-                parts.append(f"light({task.get('color', '?')})")
+                color = task.get("color") or task.get("code") or "?"
+                lines.append(f"light -> {color}")
             elif action == "speak":
                 text = str(task.get("text", ""))
-                if len(text) > 16:
-                    text = text[:16] + "..."
-                parts.append(f"speak({text})")
+                if len(text) > 24:
+                    text = text[:21] + "..."
+                lines.append(f"speak -> {text}")
+            elif action == "wait_confirm":
+                lines.append("wait_confirm -> 等待人工确认")
             elif action == "query":
-                parts.append("query()")
+                lines.append("query -> 查询状态")
             else:
-                parts.append(f"{action}()")
-
-        if len(tasks) > 8:
-            parts.append(f"...(+{len(tasks) - 8})")
-        return f"tasks[{len(tasks)}]: " + " -> ".join(parts)
+                lines.append(action or "unknown")
+        if len(tasks) > 10:
+            lines.append(f"... 还有 {len(tasks) - 10} 步")
+        return lines
 
     def print_skill_start(self, skill_name: str, description: str = "", step_num: int = 0):
-        desc = f" ({description})" if description else ""
-        num_str = f"[{step_num}] " if step_num > 0 else ""
-        print(f"{self.ICONS['skill']} {num_str}{skill_name}{desc} ... ", end="", flush=True)
+        number = f"[{step_num}] " if step_num > 0 else ""
+        display_name = description or skill_name
+        tail = f" {self._style(f'[{skill_name}]', 'muted')}" if description else ""
+        print(f"{self._style(self.ICONS['skill'], 'muted')} {number}{display_name}{tail}")
         self._last_was_skill = True
 
     def print_skill_result(self, success: bool, message: str):
-        if success:
-            print(f"{self.ICONS['success']} {message}")
-        else:
-            print(f"{self.ICONS['error']} {message}")
+        label = self._label("success" if success else "error", "ok" if success else "err")
+        print(f"   {label} {message}")
 
     def print_error(self, message: str):
-        print(f"{self.ICONS['error']} {message}")
+        print(f"{self._label('error', 'err')} {message}")
         self._last_was_skill = False
 
     def print_info(self, message: str):
-        print(f"{self.ICONS['info']} {message}")
+        print(f"{self._label('info', 'info')} {message}")
         self._last_was_skill = False
 
     def _get_skill_desc(self, skill_name: str) -> str:
@@ -237,6 +274,9 @@ class InteractionManager:
         self._cancel_event = threading.Event()
         self._current_skill = None
         self.config_path = resolve_config_path(config_path)
+        self._async_mission_active = False
+        global_event_bus.subscribe("mission_completed", self._on_async_mission_done)
+        global_event_bus.subscribe("mission_failed", self._on_async_mission_done)
 
     def set_brain(self, brain):
         self.brain = brain
@@ -248,7 +288,8 @@ class InteractionManager:
 
         while self._running:
             try:
-                self.ui.print_user_prompt()
+                if not self._async_mission_active:
+                    self.ui.print_user_prompt()
                 user_input = input().strip()
 
                 if not user_input:
@@ -271,6 +312,14 @@ class InteractionManager:
 
     def stop(self):
         self._running = False
+
+    def _on_async_mission_done(self, data=None) -> None:
+        self._async_mission_active = False
+        if not self._running:
+            return
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        self.ui.print_user_prompt()
 
     def _get_adapter(self):
         if self.brain and hasattr(self.brain, "adapter"):
@@ -573,12 +622,14 @@ class InteractionManager:
 
     def _process_input(self, text: str):
         print()
+        spinner: Optional[Spinner] = None
         try:
             if not self.brain:
                 self.ui.print_error("大脑未初始化")
                 return
 
-            print("思考中...", end="", flush=True)
+            spinner = Spinner("思考中")
+            spinner.start()
 
             all_responses = []
             current_step = 0
@@ -601,11 +652,14 @@ class InteractionManager:
                     all_responses.append(resp_dict)
                     response_type = resp_dict.get("type", "text")
 
+                    if spinner:
+                        spinner.stop()
+                        spinner = None
+
                     if response_type == "plan":
-                        print("\r" + " " * 20 + "\r", end="")
                         steps = resp_dict.get("metadata", {}).get("steps", [])
                         self.ui.print_plan(steps)
-                        print("执行中...")
+                        self.ui.print_info("执行中...")
 
                     elif response_type == "action":
                         current_step += 1
@@ -629,6 +683,7 @@ class InteractionManager:
                                 else True
                             )
                             if mission_pending_response:
+                                self._async_mission_active = True
                                 final_response = "任务已提交，正在执行中，请等待导航/回调事件。"
 
                     elif response_type == "text":
@@ -643,15 +698,18 @@ class InteractionManager:
                             final_response = cleaned_text
 
                     elif response_type == "error":
-                        print("\r" + " " * 20 + "\r", end="")
                         self.ui.print_error(resp_dict.get("content", ""))
                         had_error = True
             else:
-                print("\r" + " " * 20 + "\r", end="")
+                if spinner:
+                    spinner.stop()
+                    spinner = None
                 self.ui.print_error("大脑没有 think 方法")
                 return
 
-            print("\r" + " " * 20 + "\r", end="")
+            if spinner:
+                spinner.stop()
+                spinner = None
 
             if not all_responses:
                 self.ui.print_error("未收到大脑输出。请重试，或简化指令后再试。")
@@ -673,11 +731,16 @@ class InteractionManager:
             )
 
         except Exception as e:
-            print("\r" + " " * 20 + "\r", end="")
+            if spinner:
+                spinner.stop()
+                spinner = None
             self.ui.print_error(f"错误: {str(e)}")
             import traceback
 
             traceback.print_exc()
+        finally:
+            if spinner:
+                spinner.stop()
 
 
 def create_interaction_manager(brain=None) -> InteractionManager:

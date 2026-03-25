@@ -346,6 +346,31 @@ class SubmitMissionSkill(Skill):
                 return self._coerce_int(getattr(resolved, "map_id", None)), getattr(resolved, "map_name", None)
         return None, None
 
+    def _get_current_navigation_map(self) -> Tuple[Optional[int], Optional[str], bool]:
+        current_map_id = None
+        current_map_name = None
+        nav_running = False
+
+        if self.adapter and hasattr(self.adapter, "get_navigation_status"):
+            try:
+                nav_status = self.adapter.get_navigation_status()
+            except Exception:
+                nav_status = {}
+            if isinstance(nav_status, dict):
+                current_map_id = self._coerce_int(nav_status.get("current_map_id") or nav_status.get("map_id"))
+                nav_running = bool(nav_status.get("nav_running"))
+
+        if self.adapter and hasattr(self.adapter, "resolve_current_map"):
+            try:
+                current_map = self.adapter.resolve_current_map()
+            except Exception:
+                current_map = None
+            if current_map:
+                current_map_id = self._coerce_int(getattr(current_map, "id", current_map_id))
+                current_map_name = getattr(current_map, "name", None) or current_map_name
+
+        return current_map_id, current_map_name, nav_running
+
     def _normalize_tasks_with_world(self, tasks: List[Dict[str, Any]], context: SkillContext) -> List[Dict[str, Any]]:
         resolver = self._get_world_resolver(context)
         if not resolver:
@@ -446,6 +471,14 @@ class SubmitMissionSkill(Skill):
 
         if target_map_id is None:
             return False, "no available map, please set world default map first"
+
+        current_map_id, current_map_name, _ = self._get_current_navigation_map()
+        if current_map_id == self._coerce_int(target_map_id):
+            context.set(
+                "current_map",
+                {"id": current_map_id, "name": current_map_name or target_map_name or str(target_map_id)},
+            )
+            return True, ""
 
         try:
             start_ok = self.adapter.start_navigation(int(target_map_id))

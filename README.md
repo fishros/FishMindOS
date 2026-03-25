@@ -1,1064 +1,665 @@
 # FishMindOS
 
-FishMindOS 是一套面向机器狗的中文任务控制框架。  
-它把自然语言指令转换成一串可执行的技能步骤，再通过适配器去调用导航、动作、灯光、播报、回调等能力。
+FishMindOS 是一个面向机器人/机器狗/无人机等的具身智能编排框架。  
+它把用户输入的自然语言指令拆成结构化任务流，再通过适配器调用你的导航、动作、灯光、语音、回调等能力。
 
-当前仓库主要保留了两条运行链：
+当前仓库默认接的是 `FishBot` 风格接口，但这个项目的核心目标不是绑定某一台机器人，而是把它收敛成一套可以迁移到别的机器人上的 OS 框架。
 
-- 真实链路：`python -m fishmindos`
-- 仿真链路：`python mock_fishmindos.py`
+---
 
-本文档会说明：
+## 0. 环境要求
 
-- 当前框架是怎么组织的
-- 每个保留文件的作用
-- 如何启动真实系统和仿真系统
-- 配置文件各段的用途
-- 回调、技能、LLM、导航之间的关系
-- 常见调试入口和维护建议
+在开始之前，至少要满足下面这些条件：
 
-本文档刻意不写任何真实敏感信息，例如内部地址、令牌、密钥、端口组合等。  
-示例中的地址、路径、参数名都只作为结构说明使用。
+- Python：建议 `Python 3.10+`。
+- 环境管理：推荐使用 `conda`，也可以直接用系统 Python 虚拟环境。
+- LLM 连通性：需要能访问你配置的大模型 API。
+- 真机运行前提：需要你的机器人导航服务、应用服务、`rosbridge`、回调地址都可连通。
+- 仿真运行前提：不需要真机，但仍需要可访问的 LLM API。
 
-## 1. 当前整体结构
+如果你要跑真机链路，建议先确认这几项：
 
-### 1.1 真实运行链
+- `nav_server.host:port` 可访问
+- `nav_app.host:port` 可访问
+- `rosbridge.host:port` 可访问
+- `callback.enabled=true` 时，本机回调端口可被机器人侧访问
 
-`python -m fishmindos` 的主流程：
+最小推荐环境示例：
 
-1. 入口在 `fishmindos/__main__.py`
-2. 读取根目录配置文件 `fishmindos.config.json`
-3. 创建默认技能注册表
-4. 连接机器人适配器
-5. 初始化大脑
-   - 优先使用 `LLMBrain`
-   - 如果 LLM 不可用，则回退到规则引擎
-6. 初始化终端交互层
-7. 进入命令行对话循环
-8. 如果启用了回调，则同时启动内置回调接收器
+```text
+Python 3.10+
+conda (recommended)
+一个可用的 LLM API Key
+一套可访问的机器人导航/状态接口
+```
 
-### 1.2 仿真运行链
+安装 Python 依赖：
 
-仓库中保留一个 mock 入口：
+```bash
+pip install -r requirements.txt
+```
 
-- `mock_fishmindos.py`
-  - 使用真实 LLM
-  - 使用假的机器人适配器
-  - 适合测试“LLM 会不会排对任务”
+---
 
-### 1.3 核心分层
+## 1. 这套系统现在是什么
 
-当前保留的核心分层如下：
+当前主链路是：
 
 ```text
 用户输入
   -> interaction/manager.py
   -> brain/llm_brain.py
-  -> skills/__init__.py + skills/base.py + skills/builtin/*
-  -> adapters/fishbot.py / adapters/base.py
-  -> nav_server / nav_app / rosbridge / callback
-```
-
-如果开启导航回调，则链路中还会多一条：
-
-```text
-导航服务回调
-  -> interaction/callback_receiver.py
+  -> tools: submit_mission / system_status
+  -> brain/mission_manager.py
   -> adapters/fishbot.py
-  -> brain.session_context
-  -> system_wait / system_status / 导航相关技能
+  -> 你的导航 / rosbridge / 回调接口
 ```
 
-## 2. 目录说明
+几个关键点：
 
-当前仓库的核心目录大致如下：
+- LLM 不再直接微操底层技能。
+- LLM 主要负责两类事：
+  - `submit_mission`：生成任务流
+  - `system_status`：回答状态查询
+- 小脑 `MissionManager` 负责真正执行任务流，靠事件驱动推进，不靠阻塞等待。
+- `world` 负责语义地图和地点理解。
+- `soul` 负责长期偏好和可控学习。
 
-```text
-FishMindOS/
-├─ README.md
-├─ fishmindos.config.json
-├─ fishmindos.config.example.json
-├─ mock_fishmindos.py
-├─ docs/
-└─ fishmindos/
-   ├─ __init__.py
-   ├─ __main__.py
-   ├─ config.py
-   ├─ core/
-   ├─ adapters/
-   ├─ brain/
-   ├─ skills/
-   └─ interaction/
-```
+---
 
-## 3. 文件级说明
+## 2. 当前保留的运行方式
 
-下面是当前保留文件的职责说明。
-
-### 3.1 根目录文件
-
-`README.md`
-
-- 项目总览文档
-- 说明结构、配置、启动方式和维护方式
-
-`fishmindos.config.json`
-
-- 实际运行时读取的本地配置文件
-- 这里通常放你的真实运行参数
-- 不建议把敏感值提交到公共仓库
-
-`fishmindos.config.example.json`
-
-- 脱敏示例配置
-- 用来说明配置结构
-- 新机器或新环境建议先参考这个文件
-
-`mock_fishmindos.py`
-
-- 真 LLM + 假机器人
-- 主要测试规划能力、任务拆解能力、工具调用顺序
-
-### 3.2 `fishmindos/` 包入口与配置
-
-`fishmindos/__init__.py`
-
-- 包级导出
-- 对外暴露技能系统和 FishBot 适配器的常用工厂/类型
-
-`fishmindos/__main__.py`
-
-- 主入口
-- `python -m fishmindos` 会从这里启动
-- 负责：
-  - 读取配置
-  - 初始化技能系统
-  - 初始化适配器
-  - 初始化 LLMBrain
-  - 初始化交互层
-  - 启动内置回调接收器
-  - 优雅关闭
-
-`fishmindos/config.py`
-
-- 定义所有配置数据结构
-- 负责从：
-  - JSON 文件
-  - 环境变量
-  - 默认值
-  组合出最终运行配置
-- 包含当前主要配置段：
-  - `llm`
-  - `nav_server`
-  - `nav_app`
-  - `rosbridge`
-  - `websocket`
-  - `callback`
-  - `skills`
-  - `app`
-
-### 3.3 `fishmindos/core/`
-
-`fishmindos/core/__init__.py`
-
-- 导出核心数据模型
-
-`fishmindos/core/models.py`
-
-- 定义系统核心数据结构
-- 主要包括：
-  - `SkillContext`
-  - `SkillResult`
-  - `Robot` 相关执行事件
-  - 通用事件/状态枚举
-- 技能执行层大量依赖这个文件
-
-### 3.4 `fishmindos/adapters/`
-
-`fishmindos/adapters/__init__.py`
-
-- 适配器层对外导出
-
-`fishmindos/adapters/base.py`
-
-- 机器人适配器抽象基类
-- 规定统一接口，例如：
-  - 地图查询
-  - 路点查询
-  - 导航启动/停止
-  - 站立/趴下
-  - 灯光控制
-  - 音频播报
-  - 回调配置与事件接收
-
-`fishmindos/adapters/fishbot.py`
-
-- 当前真实机器人适配器
-- 是真实链路中最关键的设备连接层
-- 主要负责：
-  - HTTP 请求导航接口
-  - 通过 WebSocket 连接实时控制接口
-  - 管理导航状态
-  - 管理回调状态
-  - 在导航开始、到达、回充、位姿更新等事件到来时更新内部状态
-
-`fishmindos/adapters/ws_client.py`
-
-- WebSocket 客户端实现
-- 负责 rosbridge 或兼容 WebSocket 的连接、收发、重连、订阅管理
-
-`fishmindos/adapters/your_robot.py`
-
-- 预留模板文件
-- 用于以后适配别的机器人或别的控制接口
-- 当前默认主链不依赖它
-
-### 3.5 `fishmindos/brain/`
-
-`fishmindos/brain/llm_brain.py`
-
-- 当前主大脑
-- 把自然语言转成技能调用
-- 负责：
-  - 生成 system prompt
-  - 维护 session context
-  - 处理多轮 tool calling
-  - 调用技能
-  - 更新上下文
-  - 在失败时控制是否继续执行
-- 如果你要调“LLM 为什么笨”或“为什么规划不完整”，通常先看这个文件
-
-`fishmindos/brain/llm_providers.py`
-
-- LLM 提供商适配层
-- 封装不同模型服务的调用方式
-- 当前大脑通过这个文件与外部模型通信
-
-`fishmindos/brain/planner.py`
-
-- 规则规划器
-- 用于把复杂任务拆成多个子任务
-- 在规则引擎或部分回退流程中仍然会用到
-
-`fishmindos/brain/smart_brain.py`
-
-- 规则引擎版本的大脑
-- 当 LLM 初始化失败或不可用时作为后备方案
-
-`fishmindos/brain/prompt_manager.py`
-
-- 负责读取 `docs/` 里的提示词文档
-- 可以加载：
-  - `identity.md`
-  - `agent.md`
-  - `tools.md`
-  - `prompt.md`
-- 当前主链里它仍然存在，但真正的主 prompt 逻辑仍以 `llm_brain.py` 为中心
-- 也就是说：
-  - 它是“提示文档管理器”
-  - 不是当前唯一的 prompt 来源
-
-### 3.6 `fishmindos/skills/`
-
-`fishmindos/skills/__init__.py`
-
-- 默认技能注册入口
-- 把内置技能注册进统一注册表
-
-`fishmindos/skills/base.py`
-
-- 技能基类
-- 定义技能的统一接口、元数据、参数模式、执行包装
-
-`fishmindos/skills/loader.py`
-
-- 自定义技能发现与加载器
-- 支持从 `skills.search_paths` 指定目录扫描额外技能
-- 如果启用热重载，也主要由这里管理
-
-#### 3.6.1 内置技能目录 `fishmindos/skills/builtin/`
-
-`__init__.py`
-
-- 内置技能子包入口
-
-`navigation.py`
-
-- 导航技能
-- 包括：
-  - `nav_start`
-  - `nav_stop`
-  - `nav_goto_waypoint`
-  - `nav_goto_location`
-  - `nav_get_status`
-  - `nav_list_maps`
-  - `nav_list_waypoints`
-- 是地图、路点、回充等逻辑的核心
-
-`motion.py`
-
-- 站立、趴下、动作预设等技能
-
-`audio.py`
-
-- 音频播报和 TTS 技能
-- 典型技能：
-  - `audio_play`
-  - `tts_speak`
-
-`lights.py`
-
-- 灯光控制技能
-- 支持按颜色、模式或 code 控制
-
-`items.py`
-
-- 物品模拟/任务技能
-- 用于“取物、送物、放物、检查携带物”
-
-`system.py`
-
-- 系统状态技能
-- 典型能力：
-  - 电量
-  - 导航状态
-  - 充电状态
-  - 位姿
-  - 等待事件 `system_wait`
-
-`callback.py`
-
-- 回调相关技能
-- 典型能力：
-  - `callback_set`
-  - `callback_status`
-  - `callback_server_start`
-
-### 3.7 `fishmindos/interaction/`
-
-`fishmindos/interaction/__init__.py`
-
-- 交互层导出入口
-
-`fishmindos/interaction/manager.py`
-
-- 当前终端交互主文件
-- 负责：
-  - 打印欢迎头
-  - 读取用户输入
-  - 展示 `[PLAN]`
-  - 展示技能执行流
-  - 清洗脏输出
-  - 处理中止和退出
-
-`fishmindos/interaction/callback_receiver.py`
-
-- 内置回调接收器
-- 当前 `python -m fishmindos` 启用 callback 时，可以直接在进程内起一个小型 HTTP 服务接收导航事件
-- 不需要再依赖独立 `test.py`
-
-### 3.8 `docs/`
-
-`docs/README.md`
-
-- 文档目录说明
-
-`docs/identity.md`
-
-- 角色/身份提示文档
-
-`docs/agent.md`
-
-- Agent 行为说明文档
-
-`docs/tools.md`
-
-- 工具和技能说明文档
-
-`docs/Soul.md`
-
-- `Soul / 灵魂学习` 架构文档
-- 描述长期偏好沉淀、规则学习和个性化演化层
-
-`docs/prompt.md`
-
-- 系统提示规则文档
-
-`docs/ADAPTER_GUIDE.md`
-
-- 适配器扩展说明文档
-
-## 4. 配置文件说明
-
-推荐以 `fishmindos.config.example.json` 为模板，整理出自己的 `fishmindos.config.json`。
-
-### 4.1 `llm`
-
-负责大模型配置。
-
-典型字段：
-
-- `provider`
-- `api_key`
-- `base_url`
-- `model`
-- `temperature`
-- `max_tokens`
-- `timeout`
-
-建议：
-
-- 不要把真实密钥写进 README、脚本示例或公共仓库
-- 生产环境优先使用环境变量覆盖敏感项
-
-### 4.2 `nav_server`
-
-- 导航后端服务地址
-- 主要用于地图、路点、任务等导航接口
-
-### 4.3 `nav_app`
-
-- 导航应用侧接口地址
-- 常用于任务执行、播报等控制接口
-
-### 4.4 `rosbridge`
-
-- WebSocket 连接配置
-- 用于实时控制相关能力
-
-常见字段：
-
-- `host`
-- `port`
-- `path`
-- `use_ssl`
-
-`use_ssl` 的含义：
-
-- `false` 表示使用 `ws://`
-- `true` 表示使用 `wss://`
-
-### 4.5 `websocket`
-
-- WebSocket 通用行为
-- 例如是否启用、重连间隔、最大重连次数、ping 间隔
-
-### 4.6 `callback`
-
-- 导航回调配置
-- 控制 FishMindOS 是否接收导航事件
-
-关键字段：
-
-- `enabled`
-- `host`
-- `port`
-- `path`
-- `url`
-- `max_events`
-
-行为说明：
-
-- 当 `enabled=false` 时，不启用回调
-- 当 `enabled=true` 且 `url` 为空时，会根据 `host + port + path` 自动拼出 URL
-- 当回调地址指向本机时，`python -m fishmindos` 可以自动启动内置回调接收器
-
-### 4.7 `skills`
-
-- 自定义技能发现与热重载设置
-
-常见字段：
-
-- `search_paths`
-- `hot_reload`
-- `auto_discover`
-
-含义：
-
-- `search_paths`
-  - 启动时会去这些目录找自定义技能
-- `hot_reload`
-  - 是否启用热重载
-- `auto_discover`
-  - 是否自动扫描并发现技能
-
-### 4.8 `app`
-
-- 应用级配置
-- 例如身份名、日志等级、语言等
-
-## 5. 启动方式
-
-### 5.1 真实链路启动
-
-在项目根目录执行：
+### 2.1 真机运行
 
 ```bash
 python -m fishmindos
 ```
 
-如果只想看版本：
+这条链路会走真实入口：
 
-```bash
-python -m fishmindos --version
-```
+- [fishmindos/__main__.py](/d:/FishMindOS/fishmindos/__main__.py)
+- [fishmindos/config.py](/d:/FishMindOS/fishmindos/config.py)
+- [fishmindos/adapters/fishbot.py](/d:/FishMindOS/fishmindos/adapters/fishbot.py)
+- [fishmindos/brain/llm_brain.py](/d:/FishMindOS/fishmindos/brain/llm_brain.py)
+- [fishmindos/interaction/manager.py](/d:/FishMindOS/fishmindos/interaction/manager.py)
 
-常用可选参数：
+适合：
 
-```bash
-python -m fishmindos --hot-reload
-python -m fishmindos --skill-path ./custom_skills
-python -m fishmindos --nav-server <host> --nav-app <host>
-```
+- 联调真实导航接口
+- 联调 rosbridge / callback
+- 测试真实任务执行
 
-### 5.2 仿真链路启动
-
-#### 方案：测真实 LLM 的规划能力
+### 2.2 仿真运行
 
 ```bash
 python mock_fishmindos.py
 ```
 
-适合测试：
+这条链路会：
 
-- 是否会先站立再导航
-- 是否会正确插入 `system_wait`
-- 是否能识别“完成后亮灯/完成后播报”
-- 是否会生成多余步骤
+- 复用真实的 FishMindOS 主入口
+- 只把真实机器人适配器替换成 mock 适配器
+- 保留当前的 world / soul / prompt / mission_manager 逻辑
 
-适合测试：
+适合：
 
-- 骨架流程是否连通
-- 简化交互是否稳定
-- 无真机情况下做快速结构验证
+- 测 LLM 规划是否合理
+- 测任务流是否能按事件推进
+- 不连接真机时做回归
 
-## 6. 真实运行时的推荐操作步骤
+---
 
-### 6.1 初次启动
+## 3. 目录说明
 
-1. 准备 `fishmindos.config.json`
-2. 检查 LLM 配置是否有效
-3. 检查导航接口与实时接口是否可达
-4. 如果要接收导航事件，启用 `callback`
-5. 运行 `python -m fishmindos`
+你最需要关心的是这些文件和目录：
 
-### 6.2 启动后你会看到什么
+```text
+FishMindOS/
+├─ fishmindos.config.json
+├─ fishmindos.config.example.json
+├─ mock_fishmindos.py
+├─ docs/
+│  ├─ prompt.md
+│  ├─ identity.md
+│  ├─ agent.md
+│  ├─ tools.md
+│  ├─ Soul.md
+│  └─ profiles/
+├─ fishmindos/
+│  ├─ __main__.py
+│  ├─ config.py
+│  ├─ adapters/
+│  ├─ brain/
+│  ├─ interaction/
+│  ├─ skills/
+│  ├─ world/
+│  └─ soul/
+└─ skill_store/
+```
 
-主程序通常会依次打印：
+### 核心职责
 
-1. 技能系统初始化
-2. 机器人连接与健康检查
-3. 大脑初始化
-4. 交互层初始化
-5. 终端欢迎界面
+- [fishmindos/__main__.py](/d:/FishMindOS/fishmindos/__main__.py)  
+  系统装配入口。读取配置、连接适配器、初始化 world/soul/brain/UI。
 
-然后你就可以在终端直接输入自然语言指令，例如：
+- [fishmindos/config.py](/d:/FishMindOS/fishmindos/config.py)  
+  配置模型定义和配置加载。
 
-- 去某个地点
-- 打开某种灯光
-- 播报某句话
-- 查看电量
-- 返回回充点
+- [fishmindos/adapters/base.py](/d:/FishMindOS/fishmindos/adapters/base.py)  
+  机器人适配器接口定义。你要适配别的机器人，主要看这个文件。
 
-### 6.3 退出
+- [fishmindos/adapters/fishbot.py](/d:/FishMindOS/fishmindos/adapters/fishbot.py)  
+  当前默认的真实机器人适配器实现。
 
-可以使用：
+- [fishmindos/brain/llm_brain.py](/d:/FishMindOS/fishmindos/brain/llm_brain.py)  
+  大脑。负责意图理解、工具选择、提示词拼接。
 
+- [fishmindos/brain/mission_manager.py](/d:/FishMindOS/fishmindos/brain/mission_manager.py)  
+  小脑。负责事件驱动执行任务流。
+
+- [fishmindos/skills/builtin/mission.py](/d:/FishMindOS/fishmindos/skills/builtin/mission.py)  
+  `submit_mission` 工具入口。
+
+- [fishmindos/skills/builtin/system.py](/d:/FishMindOS/fishmindos/skills/builtin/system.py)  
+  `system_status` 工具入口。
+
+- [fishmindos/interaction/manager.py](/d:/FishMindOS/fishmindos/interaction/manager.py)  
+  终端 UI。
+
+- [fishmindos/interaction/callback_receiver.py](/d:/FishMindOS/fishmindos/interaction/callback_receiver.py)  
+  内置 HTTP 回调接收器，把底层回调转成系统事件。
+
+- [fishmindos/world/](/d:/FishMindOS/fishmindos/world)  
+  语义地图层。
+
+- [fishmindos/soul/](/d:/FishMindOS/fishmindos/soul)  
+  长期偏好和学习层。
+
+---
+
+## 4. 快速开始
+
+### 4.1 准备配置
+
+建议先复制一份配置文件：
+
+```bash
+copy fishmindos.config.example.json fishmindos.config.json
+```
+
+然后至少填这几类配置：
+
+#### 1. LLM
+
+```json
+{
+  "llm": {
+    "provider": "your-provider",
+    "api_key": "your-api-key",
+    "base_url": null,
+    "model": "your-model",
+    "temperature": 0.2,
+    "timeout": 30
+  }
+}
+```
+
+#### 2. 机器人导航接口
+
+```json
+{
+  "nav_server": {
+    "host": "<NAV_SERVER_HOST>",
+    "port": "<NAV_SERVER_HOST>"
+  },
+  "nav_app": {
+    "host": "<NAV_APP_HOST>",
+    "port": "<NAV_SERVER_HOST>"
+  },
+  "rosbridge": {
+    "host": "<ROSBRIDGE_HOST>",
+    "port": "<NAV_SERVER_HOST>",
+    "path": "/api/rt",
+    "use_ssl": false
+  }
+}
+```
+
+#### 3. 应用身份
+
+```json
+{
+  "app": {
+    "identity": "你的机器人名字",
+    "prompt_profile": "your_profile",
+    "language": "zh",
+    "debug": false
+  }
+}
+```
+
+#### 4. world / soul / callback
+
+```json
+{
+  "world": {
+    "enabled": true,
+    "path": "fishmindos/world/semantic_map.json",
+    "auto_switch_map": true,
+    "prefer_current_map": true,
+    "adapter_fallback": false
+  },
+  "soul": {
+    "enabled": true,
+    "path": "fishmindos/soul/soul.json",
+    "max_memories": 200
+  },
+  "callback": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8081,
+    "path": "/callback/nav_event",
+    "url": null
+  }
+}
+```
+
+### 4.2 启动
+
+```bash
+python -m fishmindos
+```
+
+启动后你会看到：
+
+- 技能系统初始化
+- 适配器连接检查
+- LLM 初始化
+- 交互层启动
+
+### 4.3 常用交互命令
+
+进入终端后可以直接输入：
+
+- `去大厅`
+- `去卫生间拿纸然后回充`
+- `你还有多少电`
+- `world`
+- `确认`
+- `停止`
 - `退出`
-- `exit`
-- `quit`
-- `Ctrl+C`
 
-系统会尽量走统一的 shutdown 流程，关闭技能加载器、回调接收器和设备连接。
+---
 
-## 7. 回调机制说明
+## 5. world 怎么用
 
-当前主链已经支持导航回调驱动的上下文更新。
+`world` 是语义地图层，不是底层地图文件本身。
 
-### 7.1 为什么要启用回调
+它的作用是：
 
-启用回调后，系统可以更及时地知道：
+- 让 LLM 知道“大厅 / 卫生间 / 前台 / 回充点”这些地点是什么意思
+- 让 LLM 理解别名、用途、关系
+- 在任务规划时把自然语言地点映射成实际地图里的位置
 
-- 导航何时启动
-- 正在去哪个目标点
-- 当前位姿
-- 目标位姿
-- 到达了哪个点
-- 回充何时完成
+### 5.1 在 UI 里设置默认 world
 
-这会直接影响：
+启动后输入：
 
-- `system_status`
-- `system_wait`
-- `nav_goto_location`
-- 大脑中的 `session_context`
+```text
+world
+```
 
-### 7.2 回调接收器做什么
+系统会：
 
-`interaction/callback_receiver.py` 会在本机起一个轻量 HTTP 服务，用来：
+1. 列出当前适配器能读到的地图
+2. 让你选一张作为默认地图
+3. 生成或刷新对应的 world 文件
 
-- 接收回调 POST
-- 暂存最近若干条事件
-- 将事件分发给适配器
-- 在终端打印简短回调日志
+### 5.2 补充语义信息
 
-### 7.3 当前回调对主流程的影响
+建议为常用点补这些内容：
 
-回调事件到来后，会更新：
+- description：这个点通常用来干什么
+- aliases：常见别名
+- category：地点类别
+- task_hints：该点常见任务
+- relations：和其他点的关系
 
-- 当前地图
-- 当前位置
-- 目标位置
-- 是否在导航
-- 到达信息
-- 回充完成状态
+这样 LLM 对世界的理解会稳定很多。
 
-所以现在等待逻辑不再只依赖轮询，也会优先利用回调。
+---
 
-## 8. 技能系统工作方式
+## 6. soul 是什么
 
-技能系统是这套项目的动作执行骨架。
+`soul` 是长期偏好和经验层。
 
-### 8.1 技能执行的统一模式
+它不是世界事实库，而是“使用习惯 / 偏好 / 可控记忆”：
 
-每个技能通常有：
+- 用户喜欢怎样称呼某个地点
+- 默认任务结束是否回充
+- 某些任务的长期偏好
 
-- `name`
-- `description`
-- `parameters`
-- `execute()`
+当前 `soul` 会从任务流里做受控学习，并写回：
 
-执行结果统一返回 `SkillResult`，最终转换成：
+- [fishmindos/soul/soul.json](/d:/FishMindOS/fishmindos/soul/soul.json)
 
-- `ok`
-- `detail`
-- `data`
+如果你不想用长期学习，可以在配置里关掉：
 
-### 8.2 默认内置技能分类
+```json
+{
+  "soul": {
+    "enabled": false
+  }
+}
+```
 
-- 导航技能
-- 动作技能
-- 音频技能
-- 灯光技能
-- 系统技能
-- 物品任务技能
-- 回调技能
+---
 
-### 8.3 自定义技能
+## 7. prompt / profile 怎么用
 
-如果你要扩展技能，优先从这几个位置入手：
+系统提示词来自：
 
-- `fishmindos/skills/base.py`
-- `fishmindos/skills/loader.py`
-- `fishmindos.config.json` 中的 `skills.search_paths`
+- [docs/prompt.md](/d:/FishMindOS/docs/prompt.md)
+- [docs/identity.md](/d:/FishMindOS/docs/identity.md)
+- [docs/agent.md](/d:/FishMindOS/docs/agent.md)
+- [docs/tools.md](/d:/FishMindOS/docs/tools.md)
+- [docs/Soul.md](/d:/FishMindOS/docs/Soul.md)
 
-推荐做法：
+同时支持 profile 覆盖：
 
-1. 在自定义目录里新增技能文件
-2. 保持与内置技能相同的接口风格
-3. 把目录加入 `search_paths`
-4. 重启程序或启用热重载
+```text
+docs/profiles/<profile_name>/
+  ├─ identity.md
+  └─ agent.md
+```
 
-## 9. LLM 与规则引擎的关系
+### 使用方式
 
-### 9.1 正常情况
+1. 新建一个 profile 目录：
 
-优先使用 `LLMBrain`：
+```text
+docs/profiles/my_robot/
+```
 
-- 识别用户意图
-- 生成技能步骤
-- 执行技能
-- 更新上下文
+2. 至少放两份文件：
 
-### 9.2 LLM 不可用时
+- `identity.md`
+- `agent.md`
 
-会回退到 `SmartBrain` 或规则规划器。
+3. 在配置里指定：
 
-这意味着：
+```json
+{
+  "app": {
+    "identity": "小虎机器人",
+    "prompt_profile": "my_robot"
+  }
+}
+```
 
-- 系统不一定彻底不可用
-- 但复杂中文复合任务的表现通常会下降
+这样你就能把同一套框架换成另一套机器人身份和交互风格，而不需要改核心代码。
 
-### 9.3 提示词文档的定位
+---
 
-`docs/` 目录主要承担：
+## 8. 怎么换 LLM API
 
-- 角色说明
-- 工具说明
-- Prompt 规则沉淀
+如果你说的“换 API”是换大模型提供商，主要改配置，不需要改主链代码。
 
-但当前真实主链里的核心 system prompt 仍然以 `llm_brain.py` 为主。  
-因此：
+改 [fishmindos.config.json](/d:/FishMindOS/fishmindos.config.json) 里的：
 
-- 改 `docs/` 会有帮助
-- 但并不代表主行为一定完全随文档变化
-- 真正的主行为仍要结合 `llm_brain.py` 一起看
+- `llm.provider`
+- `llm.api_key`
+- `llm.base_url`
+- `llm.model`
+- `llm.timeout`
 
-## 10. 调试建议
+也可以用环境变量覆盖：
 
-### 10.1 如果要查“为什么不执行”
+- `FISHMIND_LLM_PROVIDER`
+- `FISHMIND_LLM_API_KEY`
+- `FISHMIND_LLM_BASE_URL`
+- `FISHMIND_LLM_MODEL`
+- `FISHMIND_LLM_TIMEOUT`
+- `FISHMIND_APP_PROMPT_PROFILE`
+- `FISHMIND_APP_IDENTITY`
 
-优先看：
+---
 
-- `fishmindos/brain/llm_brain.py`
-- `fishmindos/skills/builtin/navigation.py`
-- `fishmindos/skills/builtin/system.py`
-- `fishmindos/adapters/fishbot.py`
+## 9. 怎么换机器人 API
 
-### 10.2 如果要查“为什么计划不对”
+如果你说的“换 API”是把这套系统接到另一台机器人上，核心不是改 README，不是改 prompt，而是改适配器。
 
-优先看：
+### 9.1 你要实现什么
 
-- `fishmindos/brain/llm_brain.py`
-- `fishmindos/brain/planner.py`
-- `docs/prompt.md`
-- `docs/tools.md`
+你需要基于 [RobotAdapter](/d:/FishMindOS/fishmindos/adapters/base.py) 实现自己的适配器。
 
-### 10.3 如果要查“为什么回调没生效”
+最关键的方法包括：
 
-优先看：
+- `connect()`
+- `disconnect()`
+- `list_maps()`
+- `get_map()`
+- `list_waypoints()`
+- `get_waypoint()`
+- `start_navigation()`
+- `stop_navigation()`
+- `goto_waypoint()`
+- `goto_point()`
+- `get_navigation_status()`
+- `navigate_to()`
+- `execute_docking_async()`
+- `get_status()`
+- `get_basic_status()`
+- `set_light()`
+- `play_audio()`
+- `set_callback_url()`
+- `handle_callback_event()`
+- `get_callback_state()`
 
-- `fishmindos/config.py`
-- `fishmindos/interaction/callback_receiver.py`
-- `fishmindos/adapters/fishbot.py`
-- 终端中 callback 相关日志
+### 9.2 推荐做法
 
-### 10.4 如果要查“为什么技能没被加载”
+1. 复制一份模板，例如新建：
 
-优先看：
+- [your_robot.py](/d:/FishMindOS/fishmindos/adapters/your_robot.py)
 
-- `fishmindos/skills/loader.py`
-- `fishmindos/skills/__init__.py`
-- 配置里的 `skills.search_paths`
+2. 让它继承 `RobotAdapter`
 
-## 11. 仓库中哪些内容不是核心运行链
+3. 先接通最小闭环：
 
-下面这些通常不是主链核心逻辑：
-
-- `.git/`
-- `.vscode/`
-- `.claude/`
-- `__pycache__/`
-- `.pytest_cache/`
-- `skill_store/`
-  - 如果你当前没有在里面放自定义技能，它只是预留目录
-
-## 12. 维护建议
-
-### 12.1 配置管理
-
-- `fishmindos.config.example.json` 保持脱敏
-- `fishmindos.config.json` 只放本机运行配置
-- 敏感项尽量走环境变量
-
-### 12.2 文档维护
-
-建议每次做较大改动时，同时更新：
-
-- 本 README
-- `docs/tools.md`
-- `docs/prompt.md`
-
-### 12.3 回归测试建议
-
-每次改完大脑或导航逻辑，至少回归这几类指令：
-
-- 单步导航
-- 导航 + 灯光
-- 导航 + 播报
+- 地图读取
+- 路点读取
+- 导航到路点
 - 回充
-- 回充完成后动作
-- 取物送物复合链
+- 状态查询
+- 语音
+- 灯光
 
-推荐先在 mock 里过一遍，再上真机。
+4. 再接回调事件
 
-## 13. 一个最常见的工作流
+### 9.3 当前代码下怎么切换到你自己的适配器
 
-### 方案一：先测规划，再上真机
+当前主入口 [__main__.py](/d:/FishMindOS/fishmindos/__main__.py) 是直接调用：
 
-1. 在 `mock_fishmindos.py` 中验证 LLM 规划
-2. 确认工具顺序正确
-3. 再运行 `python -m fishmindos`
-4. 在真实链路中测试接口联通、回调联通和执行结果
+- [create_fishbot_adapter](/d:/FishMindOS/fishmindos/adapters/__init__.py)
 
-### 方案二：直接调真实链路
+所以如果你要正式替换成自己的机器人，最直接的方式有两种：
 
-1. 准备配置文件
-2. 启动 `python -m fishmindos`
-3. 先测试：
-   - 查看状态
-   - 站立
-   - 简单导航
-   - 回充
-4. 再测试复合任务
+#### 方式 A：直接把默认工厂切到你的适配器
 
-## 14. 总结
+改：
 
-当前这份仓库已经收敛成一套相对清晰的主链：
+- [fishmindos/adapters/__init__.py](/d:/FishMindOS/fishmindos/adapters/__init__.py)
+- [fishmindos/__main__.py](/d:/FishMindOS/fishmindos/__main__.py)
 
-- `__main__.py` 负责组装系统
-- `config.py` 负责配置
-- `skills/` 负责动作定义
-- `adapters/` 负责对接真实能力
-- `brain/` 负责规划和决策
-- `interaction/` 负责终端与回调入口
-- `mock_fishmindos.py` 负责仿真验证
+把 `create_fishbot_adapter` 换成你的工厂。
 
-如果以后你继续裁剪仓库，建议优先保住这几块：
+#### 方式 B：做成多适配器工厂
 
-- `fishmindos/__main__.py`
-- `fishmindos/config.py`
-- `fishmindos/skills/`
-- `fishmindos/adapters/`
-- `fishmindos/brain/`
-- `fishmindos/interaction/`
-- `mock_fishmindos.py`
-- `fishmindos.config.example.json`
+更推荐后续这样演进：
 
-这样基本就能继续维持“真实运行 + 仿真验证”这两条主线。
+1. 在配置里增加 `adapter.type`
+2. 在 `adapters/__init__.py` 里做统一工厂
+3. 在 `__main__.py` 里按配置选择适配器
 
-## 15. 后续改进方向
+如果你准备把这套框架交给别人复用，建议走方式 B。
 
-下面这些是比较值得继续推进的方向，其中最重要的是补一层 `world`，也就是“世界地图 / 世界模型”。
+---
 
-### 15.1 新增 `world` 层
+## 10. 怎么让它变成“自己的机器人 OS”
 
-当前系统已经有：
+如果你希望别人拿到这套工程后，换掉接口和人设，就能变成“他们自己的机器人 OS”，建议按下面步骤做。
 
-- 当前地图
-- 当前路点
-- 当前位姿
-- 目标点
-- 导航状态
+### 第一步：换身份
 
-但这些信息主要还是分散在：
+改配置：
 
-- `session_context`
-- `adapter` 内部状态
-- 回调事件
-- 技能执行结果
-
-后续建议把它们统一收口到一个新的模块，例如：
-
-```text
-fishmindos/world/
-├─ __init__.py
-├─ model.py
-├─ map_graph.py
-├─ semantic_store.py
-├─ state_tracker.py
-└─ resolver.py
+```json
+{
+  "app": {
+    "identity": "你们机器人的名字",
+    "prompt_profile": "你们自己的 profile"
+  }
+}
 ```
 
-这个 `world` 层建议承担以下职责：
+再新增：
 
-- 维护“当前在哪一层、哪张图、哪个路点、哪个语义区域”
-- 维护跨地图关系，例如“楼下 = 1层，楼上 = 26层”
-- 维护语义别名，例如“前台、大厅、回充点、厕所”的标准化名称
-- 维护地图与路点的全局索引
-- 维护目标点与当前位置的关系
-- 维护机器人携带物、任务状态、回充状态等长期状态
+```text
+docs/profiles/<你们的profile>/
+  ├─ identity.md
+  └─ agent.md
+```
 
-### 15.2 世界地图应该解决什么问题
+### 第二步：换 world
 
-目前很多问题本质上都来自“系统只知道当前地图，不知道更大的世界关系”。
+把默认地图导入成你们自己的 world，补地点描述、别名、任务提示。
 
-增加世界地图后，应该重点解决这些能力：
+### 第三步：换适配器
 
-1. 跨楼层理解
+把 `FishBotAdapter` 换成你们自己的机器人适配器。
 
-- 用户说“去楼下”
-- 系统能直接解析成某个目标地图
-- 不再只把它当成普通地点名
+### 第四步：接事件
 
-2. 全局地点解析
+无论你们底层是 HTTP 回调、WebSocket、ROS topic 还是 SDK 回调，最终都要映射成这些系统事件：
 
-- 用户说“去大厅”
-- 如果多个地图里都有“大厅”，系统能结合当前地图、上下文和常用规则做选择
-- 如果无法唯一确定，再决定是否追问
+- `nav_arrived`
+- `dock_completed`
+- `action_failed`
+- `human_confirmed`
 
-3. 回充点全局统一
+这样小脑 `MissionManager` 才能继续工作。
 
-- 不同地图里的回充点名称可能不同
-- 世界层可以把它们归一成统一语义：`dock`
+### 第五步：保留统一入口
 
-4. 路径级任务理解
+对外只保留这两个入口：
 
-- 用户说“去大厅，亮红灯，然后去厕所，再回充”
-- 世界层可以知道这些地点分别属于哪张图、是否需要切图、是否可以直接导航
+```bash
+python -m fishmindos
+python -m mock_fishmindos
+```
 
-5. 长任务状态保持
+这样别人拿到后，既能连真机，也能先仿真验证。
 
-- 当前任务做到哪一步
-- 上一次到达了哪个点
-- 当前带着什么东西
-- 下一步应该去哪
+---
 
-### 15.3 世界地图建议的数据结构
+## 11. callback 需要满足什么
 
-可以把世界信息拆成几类对象：
+真实执行链是事件驱动的，所以 callback 很重要。
 
-#### 地图对象
+底层导航系统至少应该能让上层识别出：
 
-- `map_id`
-- `map_name`
-- `aliases`
-- `floor`
-- `building`
-- `description`
-
-#### 路点对象
-
-- `waypoint_id`
-- `waypoint_name`
-- `aliases`
-- `map_id`
-- `type`
-- `pose`
-- `tags`
-
-#### 语义地点对象
-
-例如：
-
-- `大厅`
-- `前台`
-- `厕所`
-- `回充点`
-
-它不一定只绑定一个具体 waypoint，而是一个“语义概念”。  
-解析时再由 `resolver` 决定落到哪个具体地图和 waypoint。
-
-#### 世界状态对象
-
-- `current_map`
-- `current_waypoint`
-- `current_pose`
-- `target_map`
-- `target_waypoint`
-- `nav_running`
-- `charging`
-- `carrying_item`
-- `last_arrival`
-- `last_callback_event`
-
-### 15.4 世界层与当前模块的关系
-
-如果以后增加 `world`，建议让它和现有模块这样协作：
-
-#### 与 `adapter` 的关系
-
-`adapter` 负责拿原始事实：
-
-- 当前位姿
-- 当前地图
-- 当前目标点
-- 到达事件
-- 回充完成事件
-
-`world` 负责把这些原始事实转成统一状态。
-
-#### 与 `skills` 的关系
-
-技能不再自己反复猜地图和路点，而是优先向 `world` 查询：
-
-- “大厅”对应哪个地图
-- 当前是否需要先切图
-- 当前任务的等待对象是谁
-
-#### 与 `brain` 的关系
-
-`LLMBrain` 不必只看零散的 `session_context`，而是可以直接拿一份结构化世界状态。
-
-这样 prompt 里就可以明确写：
-
-- 当前地图
-- 当前楼层
-- 当前所在语义地点
-- 已知世界中的关键地点
-- 当前目标
-
-这会明显提升复杂任务规划质量。
-
-### 15.5 世界层与回调的结合
-
-当前系统已经能收到这些导航事件：
-
-- 启动导航
-- 导航中位置更新
-- 目标点更新
-- 到达目标
+- 导航开始
+- 到达路点
 - 回充完成
+- 失败事件
+- 当前姿态 / 目标点信息（可选但强烈建议）
 
-这些事件很适合直接喂给 `world/state_tracker.py`。
+内置接收器在：
 
-建议未来形成这样的链路：
+- [fishmindos/interaction/callback_receiver.py](/d:/FishMindOS/fishmindos/interaction/callback_receiver.py)
 
-```text
-callback_receiver
-  -> adapter.handle_callback_event()
-  -> world.state_tracker.apply_event()
-  -> world model updated
-  -> brain / skills read latest world state
+如果你的机器人回调字段不同，重点改这里和适配器里的事件映射逻辑。
+
+---
+
+## 12. 仿真建议
+
+建议开发顺序是：
+
+1. 先跑：
+
+```bash
+python -m mock_fishmindos
 ```
 
-这样做的好处是：
+2. 验证：
 
-- 等待逻辑更稳定
-- 当前地图和位置更准确
-- 不再大量依赖技能间手动写回上下文
+- 规划是否合理
+- 任务流顺序是否合理
+- `wait_confirm` 是否合理
+- `dock` 是否收敛
 
-### 15.6 世界层与仿真系统的结合
+3. 再跑：
 
-后续 mock 系统也建议接入 `world`，这样仿真就不只是“假接口”，而是真正的“假世界”。
+```bash
+python -m fishmindos
+```
 
-建议 future mock 支持：
+4. 联调真实接口和回调
 
-- 多张地图
-- 多楼层
-- 路点别名
-- 语义地点
-- 物品分布
-- 电量变化
-- 回充状态变化
+---
 
-这样你就可以在 mock 中直接测：
+## 13. 给二次开发者的建议
 
-- “去楼下拿纸，送到大厅，再回充”
-- “去前台，再去厕所，最后回到当前楼层回充点”
-- “如果当前在 26 层，大厅指的是哪一个大厅”
+如果你打算把这套系统交给别人继续接机器人，优先保持下面这些边界清晰：
 
-### 15.7 推荐的落地顺序
+- `brain/` 只做理解、规划、调度
+- `mission_manager.py` 只做事件驱动执行
+- `adapters/` 只负责和真实机器人 API 对接
+- `world/` 只负责地点语义
+- `soul/` 只负责长期偏好
+- `docs/profiles/` 只负责机器人身份和交互风格
 
-如果后面真要做 `world`，我建议按这个顺序来：
+这几层不要混。
 
-1. 先做只读版世界状态
+尤其不要把：
 
-- 不改变主链执行逻辑
-- 先把当前地图、路点、位姿、回调事件统一收口
+- 机器人接口细节
+- 地点硬编码
+- 用户偏好
+- LLM 提示词
 
-2. 再做地点解析器
+混在同一层代码里。
 
-- 把“楼下、楼上、大厅、前台、回充点”这种自然语言映射成结构化目标
+---
 
-3. 再把导航技能接到 `world`
+## 14. 当前最常见的改造路径
 
-- `nav_goto_location`
-- `nav_start`
-- `system_wait`
+### 完全变成你们自己的机器人 OS
 
-4. 最后再让 `LLMBrain` 直接依赖 `world`
+你需要同时改：
 
-- 把 prompt 里的状态来源切换到世界模型
-- 减少零散 session context 的判断逻辑
+- 适配器
+- profile
+- world
+- 回调映射
+- 配置模板
 
-### 15.8 一个理想目标
+但可以继续保留：
 
-当 `world` 层成熟后，希望系统能做到：
+- `LLMBrain`
+- `MissionManager`
+- `InteractionManager`
+- `submit_mission / system_status`
 
-- 不只是“知道当前地图”
-- 而是“知道整个可导航世界”
-- 不只是“执行单个技能”
-- 而是“在一个稳定的世界模型里完成连续任务”
+---
 
-那时 FishMindOS 会更像一个真正有空间理解能力的机器人控制系统，而不只是一个“LLM + 技能调用器”。
+## 15. 最后一句
+
+如果你把这套系统理解成三层，会最清楚：
+
+- **大脑**：理解用户要什么
+- **小脑**：按事件把任务稳定执行完
+- **机体接口**：把动作真正发给你的机器人
+
+换 LLM、换人设、换 world、换机器人，本质上都是在替换其中一层，而不是把整个系统推倒重来。
