@@ -455,7 +455,7 @@ class MockFishBotAdapter(RobotAdapter):
         return True
     
     # ========== 状态查询 ==========
-    def get_status(self):
+    def get_status(self, force_refresh: bool = False):
         return RobotStatus(
             nav_running=self._nav_running,
             charging=self._charging,

@@ -26,7 +26,10 @@ class MissionManager:
         self._wait_reminder_stop = threading.Event()
         self._last_speak_text: str = ""
         self._active_wait_confirm_text: str = ""
+        self._active_wait_confirm_meta: Dict[str, Any] = {}
+        self._active_target: str = ""
         self._awaiting_event: Optional[str] = None
+        self._session_state: Optional[Dict[str, Any]] = None
 
         cfg = get_config()
         self._wait_reminder_enabled = bool(getattr(cfg.mission, "wait_confirm_reminder_enabled", True))
@@ -46,6 +49,31 @@ class MissionManager:
 
     def _log(self, message: str) -> None:
         print(f"\n{message}", flush=True)
+
+    def bind_session_state(self, session_state: Optional[Dict[str, Any]]) -> None:
+        self._session_state = session_state if isinstance(session_state, dict) else None
+
+    def _set_session_value(self, key: str, value: Any) -> None:
+        if isinstance(self._session_state, dict):
+            self._session_state[key] = value
+
+    def _get_session_list(self, key: str) -> List[str]:
+        if not isinstance(self._session_state, dict):
+            return []
+        value = self._session_state.get(key)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _sync_carrying_state(self, items: List[str]) -> None:
+        cleaned = [str(item).strip() for item in items if str(item).strip()]
+        self._set_session_value("carrying_items", cleaned)
+        if cleaned:
+            self._set_session_value("carrying_item", "、".join(cleaned))
+        else:
+            self._set_session_value("carrying_item", None)
 
     def _event_stream_ready(self) -> bool:
         checker = getattr(self.adapter, "_event_stream_enabled", None)
@@ -72,6 +100,8 @@ class MissionManager:
             self.last_error = ""
             self._last_speak_text = ""
             self._active_wait_confirm_text = ""
+            self._active_wait_confirm_meta = {}
+            self._active_target = ""
             self._awaiting_event = None
             self._stop_wait_confirm_reminder()
 
@@ -131,6 +161,7 @@ class MissionManager:
                 return
             with self._lock:
                 self._awaiting_event = "nav_arrived"
+                self._active_target = str(target or "").strip()
             self._log(f"[小脑] 已下发前往 {target}，等待到达回调...")
             return
 
@@ -152,6 +183,7 @@ class MissionManager:
                 return
             with self._lock:
                 self._awaiting_event = "dock_completed"
+                self._active_target = "回充点"
             self._log("[小脑] 已下发回充，等待回充完成回调...")
             return
 
@@ -177,6 +209,7 @@ class MissionManager:
             with self._lock:
                 self.waiting_for_human = True
                 self._active_wait_confirm_text = reminder_text
+                self._active_wait_confirm_meta = dict(task)
                 self._awaiting_event = "human_confirmed"
             self._start_wait_confirm_reminder(reminder_text)
             self._log("[小脑] 进入人机协同等待状态，悬停中...")
@@ -224,7 +257,14 @@ class MissionManager:
         with self._lock:
             if not self.is_busy or self.waiting_for_human or self._awaiting_event != "nav_arrived":
                 return
+            arrived_target = ""
+            if isinstance(data, dict):
+                arrived_target = str(data.get("target") or data.get("location") or "").strip()
+            arrived_target = arrived_target or self._active_target
             self._awaiting_event = None
+            self._active_target = ""
+        if arrived_target:
+            self._set_session_value("current_location", arrived_target)
         self._log("[小脑] 收到到达事件，触发下一步")
         time.sleep(0.5)
         self._execute_next(event_data=data)
@@ -234,6 +274,8 @@ class MissionManager:
             if not self.is_busy or self.waiting_for_human or self._awaiting_event != "dock_completed":
                 return
             self._awaiting_event = None
+            self._active_target = ""
+        self._set_session_value("current_location", "回充点")
         self._log("[小脑] 收到回充完成事件，触发下一步")
         time.sleep(0.5)
         self._execute_next(event_data=data)
@@ -246,10 +288,26 @@ class MissionManager:
                 or self._awaiting_event != "human_confirmed"
             ):
                 return
+            wait_meta = dict(self._active_wait_confirm_meta)
             self.waiting_for_human = False
             self._active_wait_confirm_text = ""
+            self._active_wait_confirm_meta = {}
             self._awaiting_event = None
         self._stop_wait_confirm_reminder()
+        phase = str(wait_meta.get("handover_phase", "") or "").strip().lower()
+        item_name = str(wait_meta.get("item_name", "") or "").strip()
+        if phase == "pickup" and item_name:
+            items = self._get_session_list("carrying_items")
+            if item_name not in items:
+                items.append(item_name)
+            self._sync_carrying_state(items)
+        elif phase == "dropoff":
+            items = self._get_session_list("carrying_items")
+            if item_name:
+                items = [item for item in items if item != item_name]
+            else:
+                items = []
+            self._sync_carrying_state(items)
         self._log("[小脑] 收到人类确认事件，继续执行下一步。")
         time.sleep(0.2)
         self._execute_next(event_data=data)
@@ -259,6 +317,8 @@ class MissionManager:
             self.is_busy = False
             self.waiting_for_human = False
             self._active_wait_confirm_text = ""
+            self._active_wait_confirm_meta = {}
+            self._active_target = ""
             self._awaiting_event = None
         self._stop_wait_confirm_reminder()
         self.last_error = f"action failed: {data}"

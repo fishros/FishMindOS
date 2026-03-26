@@ -116,6 +116,7 @@ class AppConfig:
     identity: str = "机器人助手"
     prompt_profile: Optional[str] = None
     language: str = "zh"
+    status_cache_ttl_sec: float = 1.0
 
 
 @dataclass
@@ -215,6 +216,8 @@ class FishMindConfig:
             config.app.identity = os.getenv("FISHMIND_APP_IDENTITY")
         if os.getenv("FISHMIND_APP_PROMPT_PROFILE"):
             config.app.prompt_profile = os.getenv("FISHMIND_APP_PROMPT_PROFILE") or None
+        if os.getenv("FISHMIND_APP_STATUS_CACHE_TTL_SEC"):
+            config.app.status_cache_ttl_sec = float(os.getenv("FISHMIND_APP_STATUS_CACHE_TTL_SEC"))
         
         return config
     
@@ -314,6 +317,8 @@ class FishMindConfig:
             config.app.identity = os.getenv("FISHMIND_APP_IDENTITY")
         if os.getenv("FISHMIND_APP_PROMPT_PROFILE"):
             config.app.prompt_profile = os.getenv("FISHMIND_APP_PROMPT_PROFILE") or None
+        if os.getenv("FISHMIND_APP_STATUS_CACHE_TTL_SEC"):
+            config.app.status_cache_ttl_sec = float(os.getenv("FISHMIND_APP_STATUS_CACHE_TTL_SEC"))
         
         return config
     

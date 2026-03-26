@@ -6,6 +6,7 @@ Simplified version for one-click startup
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import signal
 from pathlib import Path
@@ -21,6 +22,27 @@ from fishmindos.interaction.callback_receiver import CallbackReceiver
 from fishmindos.config import get_config
 from fishmindos.world import WorldResolver
 from fishmindos.soul import Soul
+
+
+def _configure_console_encoding() -> None:
+    """Configure a UTF-8 capable console on Windows."""
+    if os.name != "nt":
+        return
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleCP(65001)
+        kernel32.SetConsoleOutputCP(65001)
+    except Exception:
+        pass
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 class FishMindOS:
@@ -297,7 +319,8 @@ class FishMindOS:
                 nav_app_port=nav_app_port,
                 rosbridge_host=rosbridge_host,
                 rosbridge_port=rosbridge_port,
-                rosbridge_path=rosbridge_path
+                rosbridge_path=rosbridge_path,
+                status_cache_ttl_sec=getattr(config.app, "status_cache_ttl_sec", 1.0),
             )
 
             callback_url = self._apply_callback_config(config)
@@ -454,6 +477,8 @@ class FishMindOS:
 
 def main():
     """Main function"""
+    _configure_console_encoding()
+
     parser = argparse.ArgumentParser(
         description="FishMindOS - Smart Robot Dog Control System",
         formatter_class=argparse.RawDescriptionHelpFormatter,

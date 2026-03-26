@@ -12,3 +12,5 @@ fishmindos.config.json
 
 # 如果 skill_store 只是本地实验目录，就保留这一行
 skill_store/
+
+fishmindos/world/profiles

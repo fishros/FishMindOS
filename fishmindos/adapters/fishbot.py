@@ -32,11 +32,16 @@ class FishBotAdapter(RobotAdapter):
     def __init__(self, nav_server_host: str = "127.0.0.1", nav_server_port: int = 9001,
                  nav_app_host: str = "127.0.0.1", nav_app_port: int = 9002,
                  rosbridge_host: str = "127.0.0.1", rosbridge_port: int = 9090,
-                 rosbridge_path: str = "/api/rt"):
+                 rosbridge_path: str = "/api/rt",
+                 status_cache_ttl_sec: float = 1.0):
         self.nav_server_base = f"http://{nav_server_host}:{nav_server_port}"
         self.nav_app_base = f"http://{nav_app_host}:{nav_app_port}"
         self._connected = False
         self._current_map_id: Optional[int] = None
+        self._status_cache_ttl_sec = max(0.0, float(status_cache_ttl_sec or 0.0))
+        self._status_cache_lock = threading.Lock()
+        self._status_cache_value: Optional[RobotStatus] = None
+        self._status_cache_at: float = 0.0
         self._callback_enabled = False
         self._callback_condition = threading.Condition()
         self._callback_state: Dict[str, Any] = {
@@ -141,6 +146,7 @@ class FishBotAdapter(RobotAdapter):
             with self._battery_state_lock:
                 self._battery_state["soc"] = float(soc)
                 self._battery_state["last_soc_at"] = time.time()
+            self._invalidate_status_cache()
         except (TypeError, ValueError, AttributeError):
             return
 
@@ -162,6 +168,7 @@ class FishBotAdapter(RobotAdapter):
             if samples:
                 avg_current = sum(samples) / len(samples)
                 self._battery_state["charging"] = avg_current > 1.0
+        self._invalidate_status_cache()
 
     def _register_battery_topics(self) -> None:
         if self._battery_topics_registered:
@@ -315,6 +322,38 @@ class FishBotAdapter(RobotAdapter):
         if isinstance(value, list):
             return [FishBotAdapter._clone_value(item) for item in value]
         return value
+
+    @classmethod
+    def _clone_status(cls, status: Optional[RobotStatus]) -> Optional[RobotStatus]:
+        if status is None:
+            return None
+        return RobotStatus(
+            nav_running=bool(status.nav_running),
+            charging=bool(status.charging),
+            battery_soc=status.battery_soc,
+            current_pose=cls._clone_value(status.current_pose),
+        )
+
+    def _invalidate_status_cache(self) -> None:
+        with self._status_cache_lock:
+            self._status_cache_value = None
+            self._status_cache_at = 0.0
+
+    def _get_cached_status(self) -> Optional[RobotStatus]:
+        if self._status_cache_ttl_sec <= 0:
+            return None
+        with self._status_cache_lock:
+            if self._status_cache_value is None:
+                return None
+            if (time.time() - self._status_cache_at) > self._status_cache_ttl_sec:
+                return None
+            return self._clone_status(self._status_cache_value)
+
+    def _store_status_cache(self, status: RobotStatus) -> RobotStatus:
+        with self._status_cache_lock:
+            self._status_cache_value = self._clone_status(status)
+            self._status_cache_at = time.time()
+            return self._clone_status(self._status_cache_value)
 
     @staticmethod
     def _coerce_int(value: Any) -> Any:
@@ -490,6 +529,7 @@ class FishBotAdapter(RobotAdapter):
         with self._callback_condition:
             self._callback_state.update(updates)
             self._callback_condition.notify_all()
+        self._invalidate_status_cache()
 
     def handle_callback_event(self, event: Dict[str, Any]) -> None:
         """Merge nav callback events into adapter runtime state."""
@@ -576,6 +616,7 @@ class FishBotAdapter(RobotAdapter):
                 self._callback_state["nav_running"] = False
 
             self._callback_condition.notify_all()
+        self._invalidate_status_cache()
 
     def get_callback_state(self) -> Dict[str, Any]:
         with self._callback_condition:
@@ -679,6 +720,7 @@ class FishBotAdapter(RobotAdapter):
     def disconnect(self) -> None:
         """断开连接"""
         self._connected = False
+        self._invalidate_status_cache()
         if self.ws_client:
             self.ws_client.disconnect()
     
@@ -784,7 +826,16 @@ class FishBotAdapter(RobotAdapter):
         """停止导航"""
         try:
             result = self._request("POST", "/api/nav/nav/stop")
-            return result.get("code", -1) == 200
+            success = result.get("code", -1) == 200
+            if success:
+                self._update_callback_state(
+                    nav_running=False,
+                    target_waypoint_id=None,
+                    target_waypoint_name=None,
+                    target_pose=None,
+                    target_updated_at=None,
+                )
+            return success
         except Exception as e:
             print(f"停止导航失败: {e}")
             return False
@@ -828,7 +879,19 @@ class FishBotAdapter(RobotAdapter):
                     "speed": 0.5
                 }
             )
-            return result.get("code", -1) == 200
+            success = result.get("code", -1) == 200
+            if success:
+                self._update_callback_state(
+                    nav_running=True,
+                    target_waypoint_id=None,
+                    target_waypoint_name=None,
+                    target_pose={"x": x, "y": y, "z": 0.0, "yaw": yaw},
+                    target_updated_at=time.time(),
+                    arrived_waypoint_id=None,
+                    arrived_at=None,
+                    dock_complete_at=None,
+                )
+            return success
         except Exception as e:
             print(f"导航到坐标点失败: {e}")
             return False
@@ -898,8 +961,13 @@ class FishBotAdapter(RobotAdapter):
             return False
     
     # ========== 状态操作 ==========
-    def get_status(self) -> RobotStatus:
+    def get_status(self, force_refresh: bool = False) -> RobotStatus:
         """获取机器人状态"""
+        if not force_refresh:
+            cached_status = self._get_cached_status()
+            if cached_status is not None:
+                return cached_status
+
         status = RobotStatus()
         
         # 导航状态
@@ -935,7 +1003,7 @@ class FishBotAdapter(RobotAdapter):
             if callback_state.get("charging") is not None:
                 status.charging = bool(callback_state.get("charging"))
         
-        return status
+        return self._store_status_cache(status)
     
     def get_battery(self) -> Dict[str, Any]:
         """获取电量信息，优先使用后台缓存的电池话题数据。"""
@@ -1419,10 +1487,12 @@ def create_fishbot_adapter(nav_server_host: str = "127.0.0.1",
                           nav_app_port: int = 9002,
                           rosbridge_host: str = "127.0.0.1",
                           rosbridge_port: int = 9090,
-                          rosbridge_path: str = "/api/rt") -> FishBotAdapter:
+                          rosbridge_path: str = "/api/rt",
+                          status_cache_ttl_sec: float = 1.0) -> FishBotAdapter:
     """工厂函数：创建FishBot适配器"""
     return FishBotAdapter(
         nav_server_host, nav_server_port, 
         nav_app_host, nav_app_port,
-        rosbridge_host, rosbridge_port, rosbridge_path
+        rosbridge_host, rosbridge_port, rosbridge_path,
+        status_cache_ttl_sec=status_cache_ttl_sec,
     )

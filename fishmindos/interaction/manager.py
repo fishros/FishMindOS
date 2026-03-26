@@ -255,7 +255,7 @@ class TerminalUI:
             "motion_lie_down": "趴下",
             "system_battery": "查看电量",
             "system_status": "查看状态",
-            "world_list_locations": "????",
+            "world_list_locations": "列出可用地点",
             "smart_navigate": "智能导航",
             "submit_mission": "任务流执行",
         }
@@ -678,6 +678,26 @@ class InteractionManager:
                         skill_name = resp_dict.get("metadata", {}).get("skill", "")
                         if success and skill_name == "submit_mission":
                             result_data = resp_dict.get("metadata", {}).get("data")
+                            if isinstance(result_data, dict):
+                                result_tasks = result_data.get("tasks")
+                                if isinstance(result_tasks, list):
+                                    planned_tasks = None
+                                    for previous in reversed(all_responses):
+                                        if previous.get("type") != "plan":
+                                            continue
+                                        steps = previous.get("metadata", {}).get("steps", [])
+                                        for step in steps:
+                                            if step.get("skill") == "submit_mission":
+                                                params = step.get("params", {})
+                                                if isinstance(params, dict) and isinstance(params.get("tasks"), list):
+                                                    planned_tasks = params.get("tasks")
+                                                    break
+                                        if planned_tasks is not None:
+                                            break
+                                    if planned_tasks != result_tasks:
+                                        self.ui.print_info("实际任务流:")
+                                        for task_line in self.ui._format_mission_task_lines(result_tasks):
+                                            print(self.ui._style(f"  · {task_line}", "muted"))
                             mission_pending_response = bool(
                                 result_data.get("pending", True)
                                 if isinstance(result_data, dict)

@@ -110,9 +110,29 @@ class SubmitMissionSkill(Skill):
         )
         if match:
             candidate = match.group(1).strip("的了给帮我你他她它")
-            if candidate:
+            if candidate and not self._looks_like_location_phrase(candidate):
                 return candidate
         return None
+
+    def _looks_like_location_phrase(self, text: str) -> bool:
+        normalized = self._normalize(text)
+        if not normalized:
+            return False
+        location_prefixes = ("到", "往", "去", "回", "给")
+        location_keywords = (
+            "路点",
+            "大厅",
+            "卫生间",
+            "厕所",
+            "会议室",
+            "回充点",
+            "充电点",
+            "前台",
+            "公司",
+            "楼上",
+            "楼下",
+        )
+        return normalized.startswith(location_prefixes) or any(keyword in normalized for keyword in location_keywords)
 
     def _has_handover_intent(self, user_text: str) -> bool:
         normalized = self._normalize(user_text)
@@ -122,6 +142,15 @@ class SubmitMissionSkill(Skill):
             return False
         verbs = ("拿", "取", "带", "领", "买", "送", "交")
         return any(verb in normalized for verb in verbs)
+
+    def _has_pickup_handover_intent(self, user_text: str) -> bool:
+        normalized = self._normalize(user_text)
+        if not normalized:
+            return False
+        if self._extract_handover_item(user_text) is None:
+            return False
+        pickup_verbs = ("拿", "取", "领", "买")
+        return any(verb in normalized for verb in pickup_verbs)
 
     def _speech_implies_human_handover(self, text: Any) -> bool:
         raw = str(text or "").strip().lower()
@@ -139,6 +168,75 @@ class SubmitMissionSkill(Skill):
             "完成后",
         ]
         return any(h in raw for h in hints)
+
+    def _classify_handover_phase(self, text: Any) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        if any(marker in raw for marker in ("请帮我把", "放到篮子上", "放在篮子上", "放进篮子")):
+            return "pickup"
+        if any(marker in raw for marker in ("请拿走", "送到", "交给", "已经把")):
+            return "dropoff"
+        return ""
+
+    def _extract_item_from_speak(self, text: Any) -> Optional[str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+
+        patterns = [
+            r"请帮我把(.{1,20}?)放到篮子上",
+            r"已经把(.{1,20}?)送到",
+            r"已经取到(.{1,20}?)[，。,!！?？]",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, raw)
+            if match:
+                candidate = match.group(1).strip()
+                if candidate:
+                    return candidate
+        return self._extract_handover_item(raw)
+
+    def _has_delivery_intent(self, user_text: str) -> bool:
+        normalized = self._normalize(user_text)
+        if not normalized:
+            return False
+        return any(keyword in normalized for keyword in ("送到", "送去", "交给", "带到", "拿到"))
+
+    def _annotate_wait_confirm_tasks(self, tasks: List[Dict[str, Any]], context: SkillContext) -> List[Dict[str, Any]]:
+        """Attach pickup/dropoff metadata to wait_confirm so MissionManager can update session state."""
+        if not tasks:
+            return tasks
+
+        fallback_item = (
+            self._extract_handover_item(context.user_text or context.get("last_input", ""))
+            or str(context.get("carrying_item") or "").strip()
+            or ""
+        )
+
+        annotated: List[Dict[str, Any]] = []
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                annotated.append(task)
+                continue
+
+            action = str(task.get("action", "")).lower()
+            if action != "wait_confirm":
+                annotated.append(task)
+                continue
+
+            patched = dict(task)
+            prev = tasks[idx - 1] if idx > 0 else None
+            if isinstance(prev, dict) and str(prev.get("action", "")).lower() == "speak":
+                phase = self._classify_handover_phase(prev.get("text"))
+                item_name = self._extract_item_from_speak(prev.get("text")) or fallback_item
+                if phase and not patched.get("handover_phase"):
+                    patched["handover_phase"] = phase
+                if item_name and not patched.get("item_name"):
+                    patched["item_name"] = item_name
+
+            annotated.append(patched)
+        return annotated
 
     def _sanitize_wait_confirm_tasks(self, tasks: List[Dict[str, Any]], context: SkillContext) -> List[Dict[str, Any]]:
         """Avoid auto-hanging on wait_confirm unless intent is explicit."""
@@ -203,7 +301,16 @@ class SubmitMissionSkill(Skill):
             if next_action == "wait_confirm":
                 continue
 
-            patched.append({"action": "wait_confirm"})
+            handover_phase = self._classify_handover_phase(task.get("text"))
+            item_name = self._extract_item_from_speak(task.get("text")) or self._extract_handover_item(
+                context.user_text or context.get("last_input", "")
+            )
+            wait_task = {"action": "wait_confirm"}
+            if handover_phase:
+                wait_task["handover_phase"] = handover_phase
+            if item_name:
+                wait_task["item_name"] = item_name
+            patched.append(wait_task)
             inserted += 1
 
         if inserted > 0:
@@ -217,7 +324,9 @@ class SubmitMissionSkill(Skill):
             return tasks
 
         user_text = context.user_text or context.get("last_input", "")
-        if not self._has_handover_intent(user_text):
+        if str(context.get("carrying_item") or "").strip():
+            return tasks
+        if not self._has_pickup_handover_intent(user_text):
             return tasks
 
         for task in tasks:
@@ -243,7 +352,7 @@ class SubmitMissionSkill(Skill):
             if not target or self._is_dock_target(target):
                 continue
             patched.append({"action": "speak", "text": f"请帮我把{item}放到篮子上"})
-            patched.append({"action": "wait_confirm"})
+            patched.append({"action": "wait_confirm", "handover_phase": "pickup", "item_name": item})
             inserted = True
 
         if inserted:
@@ -251,6 +360,64 @@ class SubmitMissionSkill(Skill):
             print(f"[Mission] auto-inserted pickup handover for item={item}")
             return patched
         return tasks
+
+    def _ensure_delivery_handover(self, tasks: List[Dict[str, Any]], context: SkillContext) -> List[Dict[str, Any]]:
+        """If the robot is already carrying an item, append delivery handover when user only says where to send it."""
+        if not tasks:
+            return tasks
+
+        carrying_items_raw = context.get("carrying_items")
+        carrying_items = []
+        if isinstance(carrying_items_raw, list):
+            carrying_items = [str(item).strip() for item in carrying_items_raw if str(item).strip()]
+        carrying_item = str(context.get("carrying_item") or "").strip()
+        if not carrying_items and carrying_item:
+            carrying_items = [item for item in carrying_item.split("、") if item.strip()]
+        carrying_items = [item.strip() for item in carrying_items if item.strip()]
+        if not carrying_items:
+            return tasks
+        display_item = "、".join(carrying_items)
+
+        user_text = context.user_text or context.get("last_input", "")
+        if not self._has_delivery_intent(user_text):
+            return tasks
+
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            action = str(task.get("action", "")).lower()
+            if action == "wait_confirm" and str(task.get("handover_phase", "")).lower() == "dropoff":
+                return tasks
+            if action == "speak" and self._classify_handover_phase(task.get("text")) == "dropoff":
+                return tasks
+
+        last_goto_index = None
+        last_target = ""
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("action", "")).lower() != "goto":
+                continue
+            target = str(task.get("target", "")).strip()
+            if not target or self._is_dock_target(target):
+                continue
+            last_goto_index = idx
+            last_target = target
+
+        if last_goto_index is None or not last_target:
+            return tasks
+
+        patched: List[Dict[str, Any]] = []
+        for idx, task in enumerate(tasks):
+            patched.append(task)
+            if idx != last_goto_index:
+                continue
+            patched.append({"action": "speak", "text": f"已经把{display_item}送到{last_target}，请拿走"})
+            patched.append({"action": "wait_confirm", "handover_phase": "dropoff", "item_name": display_item})
+
+        context.set("delivery_handover_auto_inserted", True)
+        print(f"[Mission] auto-inserted delivery handover for item={display_item}, target={last_target}")
+        return patched
 
     def _get_world_resolver(self, context: SkillContext):
         resolver = context.get("world") or context.get("world_model") or getattr(context, "world_model", None)
@@ -544,6 +711,11 @@ class SubmitMissionSkill(Skill):
         # Keep only world/canonical normalization here. Task semantics should come from the LLM plan,
         # not from keyword-based rewrites at the skill layer.
         normalized_tasks = self._normalize_tasks_with_world(tasks, context)
+        normalized_tasks = self._ensure_pickup_handover(normalized_tasks, context)
+        normalized_tasks = self._ensure_delivery_handover(normalized_tasks, context)
+        normalized_tasks = self._ensure_handover_wait_confirm(normalized_tasks, context)
+        normalized_tasks = self._annotate_wait_confirm_tasks(normalized_tasks, context)
+        normalized_tasks = self._sanitize_wait_confirm_tasks(normalized_tasks, context)
         if not normalized_tasks:
             return SkillResult(False, "no executable tasks", {"tasks": []})
         prepared, prepare_reason = self._prepare_for_movement(normalized_tasks)
@@ -554,6 +726,10 @@ class SubmitMissionSkill(Skill):
             return SkillResult(False, reason, {"tasks": normalized_tasks})
 
         manager = self._get_mission_manager()
+        if hasattr(manager, "bind_session_state"):
+            manager.bind_session_state(
+                getattr(context, "shared_session_data", None) or context.session_data
+            )
         accepted = manager.submit_mission(normalized_tasks)
         if not accepted:
             detail = manager.last_error or "mission submit failed"

@@ -67,7 +67,7 @@ class GetStatusSkill(Skill):
         if not self.adapter:
             return SkillResult(False, "适配器未设置")
         
-        status = self.adapter.get_status()
+        status = self.adapter.get_status(force_refresh=True)
         
         parts = []
         if status.nav_running:
@@ -125,7 +125,7 @@ class GetStatusSkill(Skill):
         if not self.adapter:
             return SkillResult(False, "适配器未设置")
 
-        status = self.adapter.get_status()
+        status = self.adapter.get_status(force_refresh=True)
         self._sync_current_map(context)
 
         query_text = str(context.user_text or context.get("last_input", "") or "")
@@ -234,7 +234,7 @@ class GetPoseSkill(Skill):
         if not self.adapter:
             return SkillResult(False, "适配器未设置")
         
-        status = self.adapter.get_status()
+        status = self.adapter.get_status(force_refresh=True)
         pose = status.current_pose or {}
         
         x = pose.get("x", 0)
@@ -321,7 +321,7 @@ class ListWorldLocationsSkill(Skill):
     """List known places from the current semantic world."""
 
     name = "world_list_locations"
-    description = "???? world ??????????????????/??/????"
+    description = "列出当前 world 中可用的语义地点，支持按当前地图过滤，并可附带描述和别名。"
     category = "system"
 
     parameters = {
@@ -329,11 +329,11 @@ class ListWorldLocationsSkill(Skill):
         "properties": {
             "current_map_only": {
                 "type": "boolean",
-                "description": "??????????????? true?",
+                "description": "是否只列出当前地图下的地点，默认 true。",
             },
             "include_details": {
                 "type": "boolean",
-                "description": "???????????? true?",
+                "description": "是否返回地点描述和别名等详细信息，默认 true。",
             },
         },
         "required": [],
@@ -342,12 +342,12 @@ class ListWorldLocationsSkill(Skill):
     def execute(self, params: Dict[str, Any], context: SkillContext) -> SkillResult:
         resolver = context.get("world") or context.get("world_model") or getattr(context, "world_model", None)
         if not resolver or not hasattr(resolver, "world"):
-            return SkillResult(False, "????? world????????")
+            return SkillResult(False, "当前未启用 world，无法列出语义地点。")
 
         world = getattr(resolver, "world", None)
         locations = list(getattr(world, "locations", []) or [])
         if not locations:
-            return SkillResult(False, "?? world ?????????")
+            return SkillResult(False, "当前 world 里还没有配置任何地点。")
 
         current_map_only = bool(params.get("current_map_only", True))
         include_details = bool(params.get("include_details", True))
@@ -381,7 +381,7 @@ class ListWorldLocationsSkill(Skill):
         items = []
         lines = []
         for item in filtered:
-            name = str(getattr(item, "name", "") or "").strip() or "?????"
+            name = str(getattr(item, "name", "") or "").strip() or "未命名地点"
             description = str(getattr(item, "description", "") or "").strip()
             aliases = [alias for alias in (getattr(item, "aliases", None) or []) if alias]
             items.append(
@@ -403,15 +403,15 @@ class ListWorldLocationsSkill(Skill):
                 if description:
                     detail_parts.append(description)
                 if aliases:
-                    detail_parts.append(f"??: {'/'.join(aliases[:3])}")
+                    detail_parts.append(f"别名: {'/'.join(aliases[:3])}")
                 if detail_parts:
-                    label = f"{name}?{'?'.join(detail_parts)}?"
+                    label = f"{name}（{'；'.join(detail_parts)}）"
             lines.append(f"- {label}")
 
         map_label = str(
             current_map_name
             or getattr(world, "default_map_name", None)
-            or getattr(world, "name", "?? world")
+            or getattr(world, "name", "当前 world")
         ).strip()
-        message = f"{map_label} ????? {len(filtered)} ??\n" + "\n".join(lines)
+        message = f"{map_label} 可用地点有 {len(filtered)} 个：\n" + "\n".join(lines)
         return SkillResult(True, message, {"locations": items, "count": len(filtered)})

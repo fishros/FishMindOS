@@ -116,6 +116,8 @@ class Skill(ABC):
             context.user_text = context_dict.get("user_text", "")
             # 深拷贝外部状态到技能上下文
             context.session_data = context_dict.copy()
+            # Keep a live reference for async executors that need to update the real session later.
+            context.shared_session_data = context_dict
         
         # 参数验证
         valid, error = self.validate_params(params)
