@@ -29,12 +29,15 @@ class MockFishBotAdapter(RobotAdapter):
                  nav_server_host: str = "127.0.0.1", nav_server_port: int = 9001,
                  nav_app_host: str = "127.0.0.1", nav_app_port: int = 9002,
                  rosbridge_host: str = "127.0.0.1", rosbridge_port: int = 9090,
-                 rosbridge_path: str = "/api/rt"):
+                 rosbridge_path: str = "/api/rt",
+                 status_cache_ttl_sec: float = 1.0,
+                 **_: Any):
         
         self.nav_server_base = f"http://{nav_server_host}:{nav_server_port}"
         self.nav_app_base = f"http://{nav_app_host}:{nav_app_port}"
         self._connected = False
         self._current_map_id = None
+        self._status_cache_ttl_sec = status_cache_ttl_sec
         self._mock_maps = []
         self._mock_waypoints = {}
         self._mock_waypoint_aliases: Dict[int, Dict[str, Dict[str, Any]]] = {}

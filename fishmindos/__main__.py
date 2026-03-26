@@ -17,7 +17,7 @@ from fishmindos.skills import create_default_registry, SkillRegistry
 from fishmindos.skills.loader import create_skill_manager, SkillManager
 from fishmindos.adapters import create_fishbot_adapter
 from fishmindos.brain.llm_brain import LLMBrain
-from fishmindos.interaction import InteractionManager
+from fishmindos.interaction import InteractionManager, TerminalChannel
 from fishmindos.interaction.callback_receiver import CallbackReceiver
 from fishmindos.config import get_config
 from fishmindos.world import WorldResolver
@@ -57,6 +57,7 @@ class FishMindOS:
         self.adapter = None
         self.brain: Optional[LLMBrain] = None
         self.interaction: Optional[InteractionManager] = None
+        self.interaction_channel: Optional[TerminalChannel] = None
         self.callback_receiver: Optional[CallbackReceiver] = None
         self.world_resolver: Optional[WorldResolver] = None
         self.soul: Optional[Soul] = None
@@ -399,6 +400,7 @@ class FishMindOS:
             # 5. Initialize interaction layer
             print("4. Initializing interaction layer...")
             self.interaction = InteractionManager(self.brain)
+            self.interaction_channel = TerminalChannel(self.interaction)
             print("   Terminal UI ready")
             
             print()
@@ -420,7 +422,7 @@ class FishMindOS:
     
     def run(self):
         """Run main loop"""
-        if not self.interaction:
+        if not self.interaction_channel:
             print("Error: System not initialized")
             return
         
@@ -436,7 +438,7 @@ class FishMindOS:
         signal.signal(signal.SIGTERM, signal_handler)
         
         try:
-            self.interaction.start()
+            self.interaction_channel.start()
         except Exception as e:
             print(f"\nRuntime error: {e}")
         finally:
@@ -451,6 +453,9 @@ class FishMindOS:
         
         if self.skill_manager:
             self.skill_manager.shutdown()
+
+        if self.interaction_channel:
+            self.interaction_channel.stop()
 
         if self.callback_receiver:
             self.callback_receiver.stop()
