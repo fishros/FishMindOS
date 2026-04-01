@@ -392,35 +392,25 @@ class TerminalChannel(InteractionChannel):
         return False
 
     def _parse_csv_values(self, raw: str) -> List[str]:
-        return [value.strip() for value in raw.split(",") if value.strip()]
+        return self.manager.get_world_admin().parse_csv_values(raw)
 
     def _format_relations(self, relations: List[Dict[str, str]]) -> str:
-        chunks = []
-        for relation in relations[:3]:
-            relation_type = relation.get("type", "").strip()
-            target = relation.get("target", "").strip()
-            note = relation.get("note", "").strip()
-            if not relation_type or not target:
-                continue
-            chunk = f"{relation_type}:{target}"
-            if note:
-                chunk += f":{note}"
-            chunks.append(chunk)
-        return ", ".join(chunks)
+        return self.manager.get_world_admin().format_relations(relations)
 
     def _parse_relations(self, raw: str) -> List[Dict[str, str]]:
-        relations: List[Dict[str, str]] = []
-        for item in self._parse_csv_values(raw):
-            parts = [part.strip() for part in item.split(":", 2)]
-            if len(parts) < 2 or not parts[0] or not parts[1]:
-                continue
-            relation = {"type": parts[0], "target": parts[1]}
-            if len(parts) == 3 and parts[2]:
-                relation["note"] = parts[2]
-            relations.append(relation)
-        return relations
+        return self.manager.get_world_admin().parse_relations(raw)
 
     def _batch_ai_enrich_world(self, world_path: Path) -> None:
+        try:
+            response = self.manager.get_world_admin().batch_ai_enrich(self.session_id)
+        except Exception as exc:
+            self.ui.print_error(str(exc))
+            return
+        self.ui.print_info(
+            response.get("message")
+            or f"AI 补全完成，已更新 {response.get('updated_count', 0)}/{response.get('total_count', 0)} 个地点。"
+        )
+        return
         """为 world 中所有描述为空的地点调用 LLM 批量补充语义信息并保存。"""
         brain = getattr(self.manager, "brain", None)
         llm = getattr(brain, "llm", None)
@@ -650,6 +640,97 @@ class TerminalChannel(InteractionChannel):
         return True
 
     def _configure_default_world_interactive(self) -> bool:
+        if not self.manager:
+            return True
+        try:
+            state = self.manager.get_world_admin().get_state(self.session_id)
+        except Exception as exc:
+            self.ui.print_error(str(exc))
+            return True
+
+        current_world_name = state.get("world_name") or "default"
+        default_map = state.get("default_map") or {}
+        current_default_map = default_map.get("name") or default_map.get("id") or "未设置"
+        current_world_path_raw = state.get("world_path")
+        current_world_path = None
+        if current_world_path_raw:
+            current_world_path = self.manager.resolve_world_path(current_world_path_raw)
+
+        print()
+        self.ui.print_info("默认 world 设置")
+        self.ui.print_info(f"当前 world: {current_world_name} / 默认地图: {current_default_map}")
+
+        print("请选择操作:")
+        print("  1. 选择默认地图并生成/刷新 world")
+        if current_world_path and current_world_path.exists():
+            print("  2. 编辑当前 world 的地点语义信息")
+        print("  0. 取消")
+
+        action = input(":: 请输入操作编号: ").strip()
+        if action in {"", "0"}:
+            self.ui.print_info("已取消 world 设置")
+            return True
+        if action == "2" and current_world_path and current_world_path.exists():
+            config = get_config()
+            return self._edit_world_locations_interactive(current_world_path, config)
+        if action != "1":
+            self.ui.print_error("请输入有效的操作编号")
+            return True
+
+        maps = list(state.get("maps") or [])
+        if not maps:
+            self.ui.print_error("当前没有可用地图，无法设置默认 world")
+            return True
+
+        print("请选择要绑定为默认 world 的地图:")
+        for index, map_info in enumerate(maps, 1):
+            marker = " *" if map_info.get("is_default") else ""
+            print(f"  {index}. {map_info.get('name')} (ID: {map_info.get('id')}){marker}")
+        print("  0. 取消")
+
+        selection = input(":: 请输入编号: ").strip()
+        if selection in {"", "0"}:
+            self.ui.print_info("已取消 world 设置")
+            return True
+        if not selection.isdigit():
+            self.ui.print_error("请输入有效的数字编号")
+            return True
+
+        index = int(selection)
+        if index < 1 or index > len(maps):
+            self.ui.print_error("编号超出范围")
+            return True
+
+        selected_map = maps[index - 1]
+        try:
+            response = self.manager.get_world_admin().set_default_map(
+                self.session_id,
+                int(selected_map["id"]),
+            )
+        except Exception as exc:
+            self.ui.print_error(str(exc))
+            return True
+
+        self.ui.print_info(
+            response.get("message")
+            or f"已将 {selected_map.get('name')} 设为默认 world。"
+        )
+        world_path_raw = response.get("world_path")
+        if world_path_raw:
+            self.ui.print_info(f"world 文件: {world_path_raw}")
+
+        ai_now = input(":: 是否让 AI 自动补全地点语义信息？(Y/n): ").strip().lower()
+        if ai_now not in {"n", "no"}:
+            self._batch_ai_enrich_world(Path(world_path_raw) if world_path_raw else Path())
+
+        edit_now = input(":: 是否继续手动编辑地点语义信息？(y/N): ").strip().lower()
+        if edit_now in {"y", "yes"} and world_path_raw:
+            config = get_config()
+            return self._edit_world_locations_interactive(
+                self.manager.resolve_world_path(world_path_raw),
+                config,
+            )
+        return True
         adapter = self.manager.get_adapter()
         if adapter is None:
             self.ui.print_error("适配器未初始化，无法设置默认 world")

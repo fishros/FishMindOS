@@ -49,6 +49,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from fishmindos.config import get_config
 from fishmindos.interaction.channels.base import InteractionChannel
 from fishmindos.interaction import events as ev
+from fishmindos.interaction.world_admin import (
+    WorldAdminBusyError,
+    WorldAdminError,
+    WorldAdminNotFoundError,
+)
 
 if TYPE_CHECKING:
     from fishmindos.interaction.manager import InteractionManager
@@ -72,6 +77,25 @@ try:
         input: str = "确认"
 
     class ChatStopReq(_BaseModel):
+        session_id: str
+
+    class SetDefaultWorldMapReq(_BaseModel):
+        session_id: str
+        map_id: int
+
+    class UpdateWorldLocationReq(_BaseModel):
+        session_id: str
+        name: str
+        map_id: Optional[int] = None
+        map_name: Optional[str] = None
+        waypoint_id: Optional[int] = None
+        description: Optional[str] = None
+        category: Optional[str] = None
+        aliases: Optional[List[str]] = None
+        task_hints: Optional[List[str]] = None
+        relations: Optional[List[Dict[str, str]]] = None
+
+    class WorldAiEnrichReq(_BaseModel):
         session_id: str
 
     _PYDANTIC_MODELS_READY = True
@@ -228,6 +252,24 @@ class AndroidGateway(InteractionChannel):
                 content={"ok": False, "error": f"session '{session_id}' not found"},
             )
 
+        def _not_found_error(message: str) -> JSONResponse:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": message},
+            )
+
+        def _bad_request(message: str) -> JSONResponse:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": message},
+            )
+
+        def _conflict(message: str) -> JSONResponse:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": message},
+            )
+
         # ── REST endpoints ───────────────────────────────────────────
 
         @app.post("/api/session/create")
@@ -307,6 +349,64 @@ class AndroidGateway(InteractionChannel):
             locations = session.session_context.get("world_known_locations", [])
             world_name = session.session_context.get("world_name", "")
             return {"ok": True, "world_name": world_name, "locations": locations}
+
+        @app.get("/api/world/admin/state")
+        async def world_admin_state(session_id: str = Query(..., description="Session ID")):
+            try:
+                return gateway.manager.get_world_admin().get_state(session_id)
+            except WorldAdminNotFoundError as exc:
+                return _not_found_error(str(exc))
+            except WorldAdminError as exc:
+                return _bad_request(str(exc))
+
+        @app.post("/api/world/admin/default-map")
+        async def world_admin_set_default_map(req: SetDefaultWorldMapReq):
+            try:
+                return gateway.manager.get_world_admin().set_default_map(req.session_id, req.map_id)
+            except WorldAdminNotFoundError as exc:
+                return _not_found_error(str(exc))
+            except WorldAdminBusyError as exc:
+                return _conflict(str(exc))
+            except WorldAdminError as exc:
+                return _bad_request(str(exc))
+
+        @app.post("/api/world/admin/location/update")
+        async def world_admin_update_location(req: UpdateWorldLocationReq):
+            try:
+                return gateway.manager.get_world_admin().update_location(
+                    req.session_id,
+                    name=req.name,
+                    map_id=req.map_id,
+                    map_name=req.map_name,
+                    waypoint_id=req.waypoint_id,
+                    description=req.description,
+                    category=req.category,
+                    aliases=req.aliases,
+                    task_hints=req.task_hints,
+                    relations=req.relations,
+                )
+            except WorldAdminNotFoundError as exc:
+                return _not_found_error(str(exc))
+            except WorldAdminBusyError as exc:
+                return _conflict(str(exc))
+            except WorldAdminError as exc:
+                return _bad_request(str(exc))
+
+        @app.post("/api/world/admin/ai-enrich")
+        async def world_admin_ai_enrich(req: WorldAiEnrichReq):
+            loop = asyncio.get_running_loop()
+            try:
+                return await loop.run_in_executor(
+                    None,
+                    gateway.manager.get_world_admin().batch_ai_enrich,
+                    req.session_id,
+                )
+            except WorldAdminNotFoundError as exc:
+                return _not_found_error(str(exc))
+            except WorldAdminBusyError as exc:
+                return _conflict(str(exc))
+            except WorldAdminError as exc:
+                return _bad_request(str(exc))
 
         # ── WebSocket endpoint ───────────────────────────────────────
 

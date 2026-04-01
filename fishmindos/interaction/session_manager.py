@@ -114,6 +114,7 @@ class SessionManager:
             "human_prompt_text": _safe(ctx.get("human_prompt_text")),
             "async_mission_active": session.async_mission_active,
             "current_mission_id": session.current_mission_id,
+            "interaction_in_progress": _safe(ctx.get("interaction_in_progress", False)),
             "connected_channels": list(session.connected_channels),
             # ── Robot / world state (JSON-safe extracts) ──────────────
             "current_location": _safe(ctx.get("current_location")),

@@ -60,6 +60,7 @@ class InteractionManager:
         self._active_session_id: Optional[str] = None
         self._async_session_id: Optional[str] = None
         self._listeners: List[InteractionListener] = []
+        self._world_admin = None
         global_event_bus.subscribe("mission_completed", self._on_async_mission_done)
         global_event_bus.subscribe("mission_failed", self._on_async_mission_done)
         global_event_bus.subscribe("human_confirm_required", self._on_human_confirm_required)
@@ -116,6 +117,13 @@ class InteractionManager:
 
     def get_session_context(self, session_id: str) -> Dict[str, Any]:
         return self.get_session(session_id).session_context
+
+    def get_world_admin(self):
+        if self._world_admin is None:
+            from fishmindos.interaction.world_admin import WorldAdminService
+
+            self._world_admin = WorldAdminService(self)
+        return self._world_admin
 
     def _normalize_client_type(self, value: Any) -> str:
         normalized = str(value or "").strip().lower()
@@ -220,6 +228,15 @@ class InteractionManager:
             or session.waiting_for_human
             or session.current_mission_id
         )
+
+    def is_interaction_in_progress(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        return bool(session.session_context.get("interaction_in_progress"))
+
+    def is_world_mutation_blocked(self, session_id: str) -> bool:
+        return self.has_pending_session_work(session_id) or self.is_interaction_in_progress(session_id)
 
     def _activate_session(self, session_id: str, client_type: str = "unknown") -> InteractionSession:
         session = self.sessions.get_or_create(session_id, client_type=client_type)
@@ -547,6 +564,7 @@ class InteractionManager:
         origin_client = self._normalize_client_type(client_type)
         session.session_context["last_user_client_type"] = origin_client
         session.session_context["interaction_origin_client_type"] = origin_client
+        session.session_context["interaction_in_progress"] = True
         session.waiting_for_human = False
         session.session_context["waiting_for_human"] = False
         session.session_context["human_prompt_text"] = None
@@ -732,6 +750,7 @@ class InteractionManager:
                 source_client=origin_client,
             )
         finally:
+            session.session_context["interaction_in_progress"] = False
             self.emit(
                 "interaction_complete",
                 session_id=session_id,
